@@ -7,9 +7,8 @@ from typing import Any
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 
-from neurodiff.core import SemanticEvent
+
 from neurodiff.core.semantic_events import (
     ClassAdded,
     ClassModified,
@@ -18,19 +17,21 @@ from neurodiff.core.semantic_events import (
     FunctionRemoved,
     ImportAdded,
     ImportRemoved,
+    SemanticEvent,
 )
-from neurodiff.engines import DuplicationFinding, SecurityFinding
+from neurodiff.engines.architecture_engine import ArchitectureFinding
+from neurodiff.engines.duplication_engine import DuplicationFinding
+from neurodiff.engines.security_engine import SecurityFinding
+from neurodiff.engines.llm_engine import LLMReport
+
+# Severity order for sorting (low index = highest severity)
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 
 class Reporter:
     """Reporter for generating rich output."""
 
     def __init__(self, console: Console | None = None) -> None:
-        """Initialize the Reporter.
-
-        Args:
-            console: Optional Rich Console instance.
-        """
         self.console = console or Console()
 
     def report(
@@ -42,68 +43,57 @@ class Reporter:
         semantic_events: list[SemanticEvent],
         security_findings: list[SecurityFinding],
         duplication_findings: list[DuplicationFinding],
+        architecture_findings: list[ArchitectureFinding] | None = None,
+        arch_report: Any = None,
+        llm_report: LLMReport | None = None,
+        cognitive_report: Any | None = None,
+        verbose: bool = False,
     ) -> None:
-        """Generate and print a complete analysis report.
-
-        Args:
-            repo_path: Path to the analyzed repository.
-            base_ref: Base Git reference.
-            head_ref: Head Git reference.
-            files_analyzed: Number of files analyzed.
-            semantic_events: List of semantic events found.
-            security_findings: List of security findings.
-            duplication_findings: List of duplication findings.
-        """
-        # Header
+        """Generate and print a complete analysis report."""
         self._print_header(repo_path, base_ref, head_ref, files_analyzed)
-
-        # Semantic Summary
         self._print_semantic_summary(semantic_events)
-
-        # Per-file details
         self._print_file_details(semantic_events)
-
-        # Security Findings
         self._print_security_findings(security_findings)
-
-        # Duplication Warnings
         self._print_duplication_warnings(duplication_findings)
-
-        # Risk Score
+        if architecture_findings is not None:
+            self._print_architecture_findings(architecture_findings)
+        if arch_report is not None:
+            self._print_arch_report(arch_report)
+        
+        if cognitive_report is not None:
+            self._print_cognitive_report(cognitive_report)
+            
         self._print_risk_score(
-            semantic_events, security_findings, duplication_findings
+            semantic_events, security_findings, duplication_findings,
+            architecture_findings or [], arch_report
         )
 
+        if llm_report:
+            self._print_llm_report(llm_report)
+
+    # ------------------------------------------------------------------
+    # Header
+    # ------------------------------------------------------------------
     def _print_header(
         self, repo_path: str, base_ref: str, head_ref: str, files_analyzed: int
     ) -> None:
-        """Print the header panel.
-
-        Args:
-            repo_path: Path to the repository.
-            base_ref: Base Git reference.
-            head_ref: Head Git reference.
-            files_analyzed: Number of files analyzed.
-        """
-        header_content = f"""[bold cyan]Repository:[/bold cyan] {repo_path}
-[bold cyan]Diff Range:[/bold cyan] {base_ref}...{head_ref}
-[bold cyan]Files Analyzed:[/bold cyan] {files_analyzed}"""
-
+        header_content = (
+            f"[bold cyan]Repository:[/bold cyan] {repo_path}\n"
+            f"[bold cyan]Diff Range:[/bold cyan] {base_ref}...{head_ref}\n"
+            f"[bold cyan]Files Analyzed:[/bold cyan] {files_analyzed}"
+        )
         panel = Panel(
             header_content,
-            title="[bold]NeuroDiff Analysis[/bold]",
-            border_style="blue",
+            title="[bold white]🧠 NeuroDiff — Semantic Analysis[/bold white]",
+            border_style="bright_blue",
         )
         self.console.print(panel)
         self.console.print()
 
+    # ------------------------------------------------------------------
+    # Semantic Summary
+    # ------------------------------------------------------------------
     def _print_semantic_summary(self, events: list[SemanticEvent]) -> None:
-        """Print semantic analysis summary table.
-
-        Args:
-            events: List of semantic events.
-        """
-        # Count events by type
         event_counts: dict[str, int] = {
             "Functions Added": 0,
             "Functions Modified": 0,
@@ -130,204 +120,434 @@ class Reporter:
             elif isinstance(event, ImportRemoved):
                 event_counts["Imports Removed"] += 1
 
-        table = Table(title="Semantic Summary")
+        table = Table(title="📊 Semantic Summary", border_style="blue")
         table.add_column("Event Type", style="cyan")
-        table.add_column("Count", style="magenta")
+        table.add_column("Count", justify="right", style="magenta bold")
 
         for event_type, count in event_counts.items():
             if count > 0:
                 table.add_row(event_type, str(count))
 
-        self.console.print(table)
+        if all(c == 0 for c in event_counts.values()):
+            self.console.print("[yellow]No semantic changes detected.[/yellow]")
+        else:
+            self.console.print(table)
         self.console.print()
 
+    # ------------------------------------------------------------------
+    # Per-file details
+    # ------------------------------------------------------------------
     def _print_file_details(self, events: list[SemanticEvent]) -> None:
-        """Print per-file details with icons.
-
-        Args:
-            events: List of semantic events.
-        """
         if not events:
-            self.console.print("[yellow]No changes detected[/yellow]")
+            self.console.print("[yellow]No changes detected[/yellow]\n")
             return
 
-        self.console.print("[bold]File Changes:[/bold]")
+        self.console.print("[bold white]📁 File Changes:[/bold white]")
 
-        # Group events by file (use event details like language)
+        # Group events by file
         file_events: dict[str, list[SemanticEvent]] = {}
-
         for event in events:
-            key = self._get_event_file_key(event)
-            if key not in file_events:
-                file_events[key] = []
-            file_events[key].append(event)
+            file_key = self._get_event_file(event)
+            file_events.setdefault(file_key, []).append(event)
 
-        for file_key, file_event_list in file_events.items():
+        for file_path, file_event_list in sorted(file_events.items()):
             added_count = sum(
-                1
-                for e in file_event_list
+                1 for e in file_event_list
                 if isinstance(e, (FunctionAdded, ClassAdded, ImportAdded))
             )
             modified_count = sum(
-                1
-                for e in file_event_list
+                1 for e in file_event_list
                 if isinstance(e, (FunctionModified, ClassModified))
             )
             removed_count = sum(
-                1
-                for e in file_event_list
+                1 for e in file_event_list
                 if isinstance(e, (FunctionRemoved, ImportRemoved))
             )
 
             icons = []
             if added_count > 0:
-                icons.append(f"➕ {added_count}")
+                icons.append(f"[green]➕ {added_count}[/green]")
             if modified_count > 0:
-                icons.append(f"✏️  {modified_count}")
+                icons.append(f"[yellow]✏️  {modified_count}[/yellow]")
             if removed_count > 0:
-                icons.append(f"❌ {removed_count}")
+                icons.append(f"[red]❌ {removed_count}[/red]")
 
-            icon_str = " ".join(icons)
-            self.console.print(f"  {file_key}: {icon_str}")
+            self.console.print(f"  [cyan]{file_path}[/cyan]  {' '.join(icons)}")
+
+            # Detail lines per event
+            for event in file_event_list:
+                detail = self._format_event_detail(event)
+                if detail:
+                    self.console.print(f"    {detail}")
 
         self.console.print()
 
-    def _print_security_findings(
-        self, findings: list[SecurityFinding]
-    ) -> None:
-        """Print security findings section.
+    def _format_event_detail(self, event: SemanticEvent) -> str:
+        """Return a short detail string for an event."""
+        if isinstance(event, FunctionAdded):
+            cc = event.cyclomatic_complexity
+            cc_warn = " [red bold][CC!][/red bold]" if cc > 10 else ""
+            return f"[green]+[/green] fn [bold]{event.name}[/bold]  lines={event.body_lines}  cc={cc}{cc_warn}"
+        elif isinstance(event, FunctionModified):
+            cc_delta = event.complexity_after - event.complexity_before
+            cc_str = f"{event.complexity_after}"
+            if cc_delta > 0:
+                cc_str += f" [red](+{cc_delta})[/red]"
+            elif cc_delta < 0:
+                cc_str += f" [green]({cc_delta})[/green]"
+            cc_warn = " [red bold][CC!][/red bold]" if event.complexity_after > 10 else ""
+            return f"[yellow]~[/yellow] fn [bold]{event.name}[/bold]  lines {event.lines_before}→{event.lines_after}  cc={cc_str}{cc_warn}"
+        elif isinstance(event, FunctionRemoved):
+            return f"[red]-[/red] fn [bold]{event.name}[/bold]"
+        elif isinstance(event, ClassAdded):
+            methods = ", ".join(event.methods[:5])
+            if len(event.methods) > 5:
+                methods += "…"
+            inh = f"  inherits=[{', '.join(event.inherits_from)}]" if event.inherits_from else ""
+            return f"[green]+[/green] class [bold]{event.name}[/bold]  methods=[{methods}]{inh}"
+        elif isinstance(event, ClassModified):
+            parts = []
+            if event.methods_added:
+                parts.append(f"[green]+{', '.join(event.methods_added)}[/green]")
+            if event.methods_removed:
+                parts.append(f"[red]-{', '.join(event.methods_removed)}[/red]")
+            return f"[yellow]~[/yellow] class [bold]{event.name}[/bold]  " + "  ".join(parts)
+        elif isinstance(event, ImportAdded):
+            syms = f" ({', '.join(event.symbols)})" if event.symbols else ""
+            return f"[green]+[/green] import [bold]{event.module}[/bold]{syms}"
+        elif isinstance(event, ImportRemoved):
+            return f"[red]-[/red] import [bold]{event.module}[/bold]"
+        return ""
 
-        Args:
-            findings: List of security findings.
-        """
+    # ------------------------------------------------------------------
+    # Security Findings
+    # ------------------------------------------------------------------
+    def _print_security_findings(self, findings: list[SecurityFinding]) -> None:
         if not findings:
             self.console.print("[green]✓ No security issues detected[/green]")
             self.console.print()
             return
 
-        # Sort by severity
-        severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
         sorted_findings = sorted(
             findings,
-            key=lambda x: severity_order.get(x.severity.value, 99),
+            key=lambda x: _SEVERITY_ORDER.get(x.severity.lower(), 99),
         )
 
-        table = Table(title="Security Findings", style="red")
-        table.add_column("Severity", style="red")
-        table.add_column("Rule ID", style="yellow")
+        table = Table(title="🔴 Security Findings", border_style="red")
+        table.add_column("Severity", style="bold")
+        table.add_column("Category", style="yellow")
         table.add_column("File", style="cyan")
-        table.add_column("Line", style="magenta")
-        table.add_column("Issue", style="white")
+        table.add_column("Line", justify="right", style="magenta")
+        table.add_column("Function", style="green")
+        table.add_column("Description", style="white")
+        table.add_column("Rule ID", style="dim")
 
-        for finding in sorted_findings:
+        severity_colors = {
+            "critical": "red bold",
+            "high": "red",
+            "medium": "yellow",
+            "low": "cyan",
+            "info": "blue",
+        }
+
+        for f in sorted_findings:
+            sev_color = severity_colors.get(f.severity.lower(), "white")
             table.add_row(
-                finding.severity.value,
-                finding.rule_id,
-                Path(finding.file_path).name,
-                str(finding.line),
-                finding.title[:50],
+                f"[{sev_color}]{f.severity.upper()}[/{sev_color}]",
+                f.category,
+                Path(f.file).name,
+                str(f.line),
+                f.function_name or "—",
+                f.description[:60],
+                f.rule_id or "—",
             )
 
         self.console.print(table)
         self.console.print()
 
-    def _print_duplication_warnings(
-        self, findings: list[DuplicationFinding]
-    ) -> None:
-        """Print duplication warnings section.
-
-        Args:
-            findings: List of duplication findings.
-        """
+    # ------------------------------------------------------------------
+    # Duplication Warnings
+    # ------------------------------------------------------------------
+    def _print_duplication_warnings(self, findings: list[DuplicationFinding]) -> None:
         if not findings:
             self.console.print("[green]✓ No code duplication detected[/green]")
             self.console.print()
             return
 
-        table = Table(title="Code Duplication Warnings", style="yellow")
-        table.add_column("Source File", style="cyan")
-        table.add_column("Target File", style="cyan")
-        table.add_column("Similarity", style="yellow")
-        table.add_column("Severity", style="red")
+        table = Table(title="🟠 Duplication Warnings", border_style="yellow")
+        table.add_column("New Function", style="green bold")
+        table.add_column("New File", style="cyan")
+        table.add_column("Similar Function", style="yellow bold")
+        table.add_column("Similar File", style="cyan")
+        table.add_column("Similarity", justify="right")
+        table.add_column("Severity", style="bold")
 
-        for finding in findings:
-            similarity_str = f"{finding.similarity:.1%}"
+        severity_colors = {"high": "red", "medium": "yellow"}
+
+        for f in sorted(findings, key=lambda x: -x.similarity_score):
+            sev_color = severity_colors.get(f.severity.lower(), "white")
+            similarity_pct = f"{f.similarity_score:.1%}"
+            if f.similarity_score >= 0.9:
+                similarity_pct = f"[red bold]{similarity_pct}[/red bold]"
+            else:
+                similarity_pct = f"[yellow]{similarity_pct}[/yellow]"
+
             table.add_row(
-                Path(finding.source_file).name,
-                Path(finding.target_file).name,
-                similarity_str,
-                finding.severity,
+                f.new_function,
+                Path(f.new_file).name,
+                f.similar_function,
+                Path(f.similar_file).name,
+                similarity_pct,
+                f"[{sev_color}]{f.severity.upper()}[/{sev_color}]",
+            )
+
+        self.console.print(table)
+        self.console.print(
+            "[dim]💡 Suggestion: Consider extracting shared logic into a common utility function.[/dim]"
+        )
+        self.console.print()
+
+    # ------------------------------------------------------------------
+    # Architecture Findings
+    # ------------------------------------------------------------------
+    def _print_architecture_findings(self, findings: list[ArchitectureFinding]) -> None:
+        if not findings:
+            self.console.print("[green]✓ No architectural concerns detected[/green]")
+            self.console.print()
+            return
+
+        table = Table(title="🏛️  Architecture Analysis", border_style="blue")
+        table.add_column("Severity", style="bold")
+        table.add_column("Rule", style="dim")
+        table.add_column("File", style="cyan")
+        table.add_column("Entity", style="green bold")
+        table.add_column("Issue", style="white")
+        table.add_column("Suggestion", style="dim italic")
+
+        severity_colors = {
+            "critical": "red bold", "high": "red",
+            "medium": "yellow", "low": "cyan",
+        }
+        severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        sorted_findings = sorted(findings, key=lambda f: severity_order.get(f.severity, 9))
+
+        for f in sorted_findings:
+            color = severity_colors.get(f.severity, "white")
+            table.add_row(
+                f"[{color}]{f.severity.upper()}[/{color}]",
+                f.rule_id,
+                Path(f.file).name,
+                f.entity_name,
+                f.title,
+                f.suggestion[:60],
             )
 
         self.console.print(table)
         self.console.print()
 
+    def _print_arch_report(self, report: Any) -> None:
+        """Print the complete architectural report (layer violations, circular deps, SOLID findings)."""
+        pass # Placeholder for actual implementation if needed
+
+    # ------------------------------------------------------------------
+    # Cognitive Report
+    # ------------------------------------------------------------------
+    def _print_cognitive_report(self, report: Any) -> None:
+        """Print the cognitive load and AI generation analysis."""
+        self.console.print("\n[bold cyan]━━━ Cognitive Load Analysis ━━━━━━━━━━━━━━━━━━[/bold cyan]\n")
+
+        # 1. AI-Generated Probability
+        ai = report.ai_generated
+        conf = "HIGH" if ai.confidence == "high" else "MED" if ai.confidence == "medium" else "LOW"
+        color = "red" if ai.probability > 0.7 else "yellow" if ai.probability > 0.4 else "green"
+        self.console.print(f"[bold]AI-Generated Code Probability:[/bold] [{color}]{ai.probability:.0%}[/{color}] ({conf} confidence)")
+        
+        if ai.signals_triggered:
+            self.console.print(f"  [dim]Signals: {', '.join(ai.signals_triggered)}[/dim]")
+        self.console.print(f"  [dim]Estimated: ~{ai.estimated_ai_lines} AI lines / ~{ai.human_lines} human lines[/dim]\n")
+
+        # 2. Cognitive Fatigue Index
+        cfi = report.fatigue_index
+        grade_color = {"A": "green", "B": "cyan", "C": "yellow", "D": "red", "F": "red bold"}
+        g_col = grade_color.get(cfi.grade, "white")
+        
+        self.console.print(f"[bold]Cognitive Fatigue Index:[/bold] {cfi.total_score}/100  [bold {g_col}][Grade: {cfi.grade}][/bold {g_col}]")
+        
+        comp = cfi.component_scores
+        table = Table(box=None, show_header=False)
+        table.add_column(style="dim")
+        table.add_column(justify="right", style="cyan")
+        
+        table.add_row("  Volume:", f"{comp.get('A_volume', 0)}/25")
+        table.add_row("  Spread:", f"{comp.get('B_spread', 0)}/20")
+        table.add_row("  Conceptual Dist:", f"{comp.get('C_conceptual_distance', 0)}/20")
+        table.add_row("  Context Switches:", f"{comp.get('D_context_switches', 0)}/15")
+        table.add_row("  Complexity Delta:", f"{comp.get('E_complexity_delta', 0)}/10")
+        table.add_row("  AI Amplification:", f"{comp.get('F_ai_amplification', 0)}/10")
+        self.console.print(table)
+        
+        self.console.print(f"\n  [dim]Estimated review time: {cfi.review_time_estimate}[/dim]")
+        self.console.print(f"  [dim]Recommendation: {cfi.reviewer_recommendation}[/dim]\n")
+
+        # 3. Blast Radius
+        br = report.blast_radius
+        r_col = {"contained": "green", "moderate": "yellow", "wide": "red", "critical": "red bold"}
+        r_c = r_col.get(br.risk_score, "white")
+        
+        self.console.print(f"[bold]Blast Radius:[/bold] [{r_c}]{br.risk_score.upper()}[/{r_c}]  [dim]({br.total_affected} modules affected)[/dim]")
+        if br.hotspot:
+            self.console.print(f"  [dim]Hotspot: {br.hotspot} → {br.hotspot_dependents} dependents[/dim]")
+        self.console.print()
+
+        # 4. Commit Anti-Patterns
+        ap = report.commit_patterns
+        if ap.anti_patterns:
+            self.console.print("[bold]Commit Anti-Patterns Detected:[/bold]")
+            for p in ap.anti_patterns:
+                icon = "🔴" if p.severity == "high" else "🟡" if p.severity == "medium" else "🟢"
+                self.console.print(f"  {icon} [bold]{p.severity.upper():<4}[/bold] \"{p.name}\"")
+                self.console.print(f"         [dim]— {p.evidence}[/dim]")
+            self.console.print()
+
+        # 5. Overall Verdict
+        v_map = {"safe": ("✅ SAFE", "green"), "caution": ("⚠ CAUTION", "yellow"), "danger": ("⛔ DANGER", "red bold")}
+        v_str, v_col = v_map.get(report.overall_verdict, ("UNKNOWN", "white"))
+        self.console.print(f"[bold]Overall Verdict:[/bold] [{v_col}]{v_str}[/{v_col}]\n")
+
+    # ------------------------------------------------------------------
+    # Risk Score
+    # ------------------------------------------------------------------
     def _print_risk_score(
         self,
         semantic_events: list[SemanticEvent],
         security_findings: list[SecurityFinding],
         duplication_findings: list[DuplicationFinding],
+        architecture_findings: list[ArchitectureFinding] | None = None,
+        arch_report: Any = None,
     ) -> None:
-        """Print risk score summary badge.
+        arch = architecture_findings or []
+        has_critical_security = any(f.severity.lower() == "critical" for f in security_findings)
+        has_high_security = any(f.severity.lower() == "high" for f in security_findings)
+        has_high_duplication = any(f.similarity_score > 0.90 for f in duplication_findings)
+        has_high_architecture = any(f.severity in ("critical", "high") for f in arch)
 
-        Args:
-            semantic_events: List of semantic events.
-            security_findings: List of security findings.
-            duplication_findings: List of duplication findings.
-        """
-        # Calculate risk score (simplified)
-        complexity_increase = sum(
-            1
-            for e in semantic_events
-            if isinstance(e, FunctionModified)
-            and e.complexity_after > e.complexity_before
-        )
+        complexity_warnings = [
+            e for e in semantic_events
+            if isinstance(e, (FunctionAdded, FunctionModified))
+            and (
+                (isinstance(e, FunctionAdded) and e.cyclomatic_complexity > 10)
+                or (isinstance(e, FunctionModified) and e.complexity_after > 10)
+            )
+        ]
 
-        critical_findings = sum(
-            1 for f in security_findings if f.severity.value == "CRITICAL"
-        )
-        high_findings = sum(
-            1 for f in security_findings if f.severity.value == "HIGH"
-        )
-        high_duplication = sum(
-            1 for f in duplication_findings if f.severity == "HIGH"
-        )
-
-        risk_score = (
-            critical_findings * 10
-            + high_findings * 5
-            + high_duplication * 2
-            + complexity_increase * 1
-        )
-
-        if risk_score == 0:
-            risk_badge = "[green bold]✓ LOW RISK[/green bold]"
-        elif risk_score < 5:
-            risk_badge = "[yellow bold]⚠ MEDIUM RISK[/yellow bold]"
-        elif risk_score < 10:
-            risk_badge = "[orange bold]⚠ HIGH RISK[/orange bold]"
+        if has_critical_security:
+            risk_level, risk_badge, border = "CRITICAL", "[red bold]🚨 CRITICAL[/red bold]", "red"
+        elif has_high_security or has_high_duplication or has_high_architecture:
+            risk_level, risk_badge, border = "HIGH", "[red]⚠ HIGH[/red]", "red"
+        elif security_findings or duplication_findings or complexity_warnings or arch:
+            risk_level, risk_badge, border = "MEDIUM", "[yellow bold]⚠ MEDIUM[/yellow bold]", "yellow"
         else:
-            risk_badge = "[red bold]🚨 CRITICAL RISK[/red bold]"
+            risk_level, risk_badge, border = "LOW", "[green bold]✓ LOW[/green bold]", "green"
+
+        lines = [
+            f"Overall Risk: {risk_badge}",
+            f"Security:      {len(security_findings):>3}  findings  "
+            f"(critical={sum(1 for f in security_findings if f.severity == 'critical')}, "
+            f"high={sum(1 for f in security_findings if f.severity == 'high')})",
+            f"Duplication:   {len(duplication_findings):>3}  alerts    "
+            f"(>90%={sum(1 for f in duplication_findings if f.similarity_score > 0.90)})",
+            f"Architecture:  {len(arch):>3}  concerns  "
+            f"(high={sum(1 for f in arch if f.severity in ('critical','high'))})",
+            f"Complexity:    {len(complexity_warnings):>3}  warnings  (cc > 10)",
+        ]
 
         panel = Panel(
-            f"Overall Risk Assessment: {risk_badge}\nRisk Score: {risk_score}",
-            border_style="red" if risk_score > 0 else "green",
+            "\n".join(lines),
+            title="[bold]📋 Risk Assessment[/bold]",
+            border_style=border,
         )
         self.console.print(panel)
 
-    def _get_event_file_key(self, event: SemanticEvent) -> str:
-        """Get a file key from an event.
 
-        Args:
-            event: A semantic event.
+    # ------------------------------------------------------------------
+    # LLM Deep Analysis
+    # ------------------------------------------------------------------
+    def _print_llm_report(self, report: LLMReport) -> None:
+        if report.error:
+            self.console.print(f"[red bold]LLM Error:[/red bold] {report.error}")
+            return
 
-        Returns:
-            A file key string.
-        """
-        if isinstance(event, (FunctionAdded, FunctionModified, FunctionRemoved)):
-            return f"{event.language}:{event.name}"
-        elif isinstance(event, (ClassAdded, ClassModified)):
-            return f"{event.language}:{event.name}"
-        elif isinstance(event, (ImportAdded, ImportRemoved)):
-            return f"{event.language}:{event.module}"
+        self.console.print(f"\n[bold magenta]━━━ 🤖 LLM Deep Analysis ({report.provider_used}) ━━━━━━━━━━━━━━[/bold magenta]\n")
+
+        # Call 1: Executive Summary
+        exec_sum = report.executive_summary
+        if exec_sum:
+            safe = exec_sum.get("safe_to_merge")
+            verdict_icon = "✅ SAFE TO MERGE" if safe else "⛔ NOT SAFE TO MERGE"
+            conf = exec_sum.get("confidence", 0)
+            conf_str = f"[{'HIGH' if conf >= 0.8 else 'MEDIUM' if conf >= 0.5 else 'LOW'} confidence: {conf}]"
+            
+            self.console.print(f"[bold]Verdict:[/bold] {verdict_icon}  [dim]{conf_str}[/dim]")
+            self.console.print(f"[italic]\"{exec_sum.get('one_line_verdict', '')}\"[/italic]\n")
+
+            if not safe and exec_sum.get("merge_blockers"):
+                self.console.print("[bold red]Merge Blockers:[/bold red]")
+                for blocker in exec_sum.get("merge_blockers", []):
+                    self.console.print(f"  • {blocker}")
+                self.console.print()
+
+        # Call 2: Pattern Analysis
+        patt_an = report.pattern_analysis
+        if patt_an:
+            patterns = patt_an.get("patterns_detected", [])
+            if patterns:
+                self.console.print("[bold cyan]Design Patterns Detected:[/bold cyan]")
+                for p in patterns:
+                    sev = p.get("severity", "medium").upper()
+                    self.console.print(f"  • {p.get('pattern')} ({sev})")
+                    for ev in p.get("evidence", []):
+                        self.console.print(f"    [dim]Evidence: {ev}[/dim]")
+                self.console.print()
+
+            tech_debt = patt_an.get("estimated_tech_debt_hours")
+            if tech_debt:
+                self.console.print(f"[bold]Estimated Tech Debt:[/bold] ~{tech_debt} hours to address HIGH+ findings\n")
+
+        # Call 3: Fix Plan
+        fix_plan = report.fix_plan
+        if fix_plan:
+            actions = fix_plan.get("immediate_actions", [])
+            if actions:
+                self.console.print("[bold yellow]Immediate Actions (priority order):[/bold yellow]")
+                for act in sorted(actions, key=lambda x: x.get("priority", 99)):
+                    file_tag = f"[{act.get('file')}] " if act.get('file') else ""
+                    self.console.print(f"  {act.get('priority', '*')}. {file_tag}{act.get('action')}")
+                self.console.print()
+
+            checklist = fix_plan.get("before_merge_checklist", [])
+            if checklist:
+                self.console.print("[bold]Before Merge Checklist:[/bold]")
+                for item in checklist:
+                    self.console.print(f"  ✗ {item}")
+                self.console.print()
+
+            split = fix_plan.get("suggested_split")
+            if split is not None:
+                split_str = "YES" if split else "NO"
+                self.console.print(f"[bold]Split PR recommended:[/bold] {split_str}")
+                if split and fix_plan.get("split_rationale"):
+                    self.console.print(f"  [dim]\"{fix_plan.get('split_rationale')}\"[/dim]")
+        
+        self.console.print()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _get_event_file(self, event: SemanticEvent) -> str:
+        """Extract the file path from any semantic event."""
+        if isinstance(event, (
+            FunctionAdded, FunctionModified, FunctionRemoved,
+            ClassAdded, ClassModified, ImportAdded, ImportRemoved,
+        )):
+            return event.file  # type: ignore[union-attr]
         return "unknown"

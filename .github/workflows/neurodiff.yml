@@ -1,0 +1,56 @@
+# NeuroDiff — Semantic AI Code Review CI Workflow
+# Copy this file to .github/workflows/neurodiff.yml in any repository.
+#
+# On every Pull Request, NeuroDiff will:
+#   1. Analyze the semantic diff (AST, Security, Duplication, Architecture)
+#   2. Optionally run LLM deep analysis (requires API key secrets)
+#   3. Upload SARIF results to the GitHub Security tab
+#   4. Post a detailed review comment on the PR
+#   5. Fail the pipeline if critical issues are found
+
+name: NeuroDiff AI Code Review
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+
+permissions:
+  contents: read
+  pull-requests: write         # Required to post PR comments
+  security-events: write       # Required to upload SARIF to Security tab
+
+jobs:
+  neurodiff:
+    name: Semantic Code Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for git diff
+
+      - name: Install NeuroDiff
+        run: pip install .
+        
+      - name: Run NeuroDiff
+        run: |
+          neurodiff analyze ${{ github.event.pull_request.base.sha }} ${{ github.sha }} \
+            --format html \
+            --output neurodiff-report.html \
+            --github-comment \
+            --max-cfi 80
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+
+      - name: Upload HTML Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: neurodiff-report
+          path: neurodiff-report.html
+        if: always()

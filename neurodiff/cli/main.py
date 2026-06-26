@@ -1,151 +1,70 @@
-"""NeuroDiff CLI main module."""
+"""NeuroDiff CLI — Phases 1, 2, 3."""
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Optional
 
 import typer
 from rich.console import Console
 
-from neurodiff.core.ast_engine import ASTEngine
-from neurodiff.core.git_parser import GitParser
-from neurodiff.core.semantic_events import NeuroDiffError
-from neurodiff.engines.duplication_engine import DuplicationEngine
-from neurodiff.engines.security_engine import SecurityEngine
-from neurodiff.output.reporter import Reporter
-
 app = typer.Typer(
     name="neurodiff",
-    help="Semantic git diff analysis CLI tool",
+    help=(
+        "🧠 NeuroDiff — Deep semantic git diff analysis for AI-generated code.\n\n"
+        "Analyzes git diffs at AST level and runs multi-engine analysis:\n"
+        "security, duplication, and architectural impact."
+    ),
+    rich_markup_mode="rich",
 )
+
+config_app = typer.Typer(help="Manage NeuroDiff configuration and API keys")
+app.add_typer(config_app, name="config")
 
 console = Console()
 
+# Common types
+_FormatType = Literal["terminal", "json", "html", "sarif", "all"]
+_LangType = Literal["python", "javascript", "typescript", "auto"]
+_OnlyType = Literal["semantic", "security", "duplication", "arch", "cognitive", "all"]
+
+
+# ---------------------------------------------------------------------------
+# index command
+# ---------------------------------------------------------------------------
 
 @app.command()
-def analyze(
-    base_ref: str = typer.Argument(..., help="Base Git reference"),
-    head_ref: str = typer.Argument(..., help="Head Git reference"),
-    repo_path: str = typer.Option(
-        ".",
-        "--repo-path",
-        "-r",
-        help="Path to the Git repository",
-    ),
-    format_type: Literal["terminal", "json"] = typer.Option(
-        "terminal",
-        "--format",
-        "-f",
-        help="Output format",
-    ),
-    language: Literal["python", "javascript", "typescript", "auto"] = typer.Option(
-        "auto",
-        "--lang",
-        "-l",
-        help="Programming language to analyze",
-    ),
+def index(
+    repo_path: str = typer.Argument(".", help="Path to the Git repository to index"),
 ) -> None:
-    """Analyze semantic differences between two Git references.
+    """Index a repository for code duplication detection.
 
-    Example:
-        neurodiff analyze main feature/new-feature
-        neurodiff analyze HEAD~5 HEAD --format json
-        neurodiff analyze v1.0 v2.0 --repo-path /path/to/repo
+    Walks all Python/JS/TS files, extracts function bodies, and stores vector
+    embeddings in a local ChromaDB. Run once before `neurodiff analyze`.
     """
+    from neurodiff.core.ast_engine import ASTEngine
+    from neurodiff.engines.duplication_engine import DuplicationEngine
+    from neurodiff.core.semantic_events import NeuroDiffError
+
     try:
         repo_path_obj = Path(repo_path).resolve()
+        console.print(f"[blue]Indexing repository:[/blue] {repo_path_obj}")
 
-        # Initialize components
-        console.print("[blue]Initializing NeuroDiff...[/blue]")
-        git_parser = GitParser(repo_path_obj)
         ast_engine = ASTEngine()
-        security_engine = SecurityEngine()
-        duplication_engine = DuplicationEngine()
+        dup_engine = DuplicationEngine()
 
-        # Get file diffs
-        console.print(f"[blue]Analyzing diffs: {base_ref}...{head_ref}[/blue]")
-        file_diffs = git_parser.get_file_diffs(base_ref, head_ref)
-
-        if not file_diffs:
-            console.print("[yellow]No changes found between the specified refs[/yellow]")
-            raise typer.Exit(0)
-
-        # Analyze each file
-        all_semantic_events = []
-        all_security_findings = []
-        all_duplication_snippets = []
-
-        for file_diff in file_diffs:
-            # Skip if language doesn't match (if specific language requested)
-            if language != "auto" and file_diff.language != language:
-                continue
-
+        if not dup_engine.has_chromadb:
             console.print(
-                f"  Analyzing [cyan]{file_diff.path}[/cyan] "
-                f"([yellow]{file_diff.language}[/yellow])"
+                "[red]ChromaDB not available. Install with:[/red] "
+                "pip install chromadb sentence-transformers"
             )
+            raise typer.Exit(1)
 
-            # Extract semantic events
-            try:
-                events = ast_engine.extract_events(
-                    file_diff.content_before,
-                    file_diff.content_after,
-                    file_diff.language,
-                )
-                all_semantic_events.extend(events)
-            except Exception as e:
-                console.print(
-                    f"  [yellow]Warning: Could not extract events: {e}[/yellow]"
-                )
-
-            # Security analysis
-            try:
-                findings = security_engine.analyze(
-                    file_diff.content_after, file_diff.path
-                )
-                all_security_findings.extend(findings)
-            except Exception as e:
-                console.print(
-                    f"  [yellow]Warning: Could not run security analysis: {e}[/yellow]"
-                )
-
-            # Collect snippets for duplication analysis
-            if file_diff.content_after.strip():
-                all_duplication_snippets.append(
-                    (file_diff.path, file_diff.content_after)
-                )
-
-        # Duplication analysis
-        try:
-            all_duplication_findings = duplication_engine.analyze(
-                all_duplication_snippets
-            )
-        except Exception as e:
-            console.print(
-                f"[yellow]Warning: Could not run duplication analysis: {e}[/yellow]"
-            )
-            all_duplication_findings = []
-
-        console.print()
-
-        # Generate report
-        if format_type == "json":
-            _output_json(
-                all_semantic_events,
-                all_security_findings,
-                all_duplication_findings,
-            )
-        else:
-            reporter = Reporter(console)
-            reporter.report(
-                str(repo_path_obj),
-                base_ref,
-                head_ref,
-                len(file_diffs),
-                all_semantic_events,
-                all_security_findings,
-                all_duplication_findings,
-            )
+        console.print("[yellow]Extracting and embedding functions…[/yellow]")
+        count = dup_engine.index_repo(repo_path_obj, ast_engine)
+        console.print(f"[green]✓ Indexed [bold]{count}[/bold] functions.[/green]")
+        console.print(f"[dim]Database: {dup_engine.CHROMA_DB_PATH}[/dim]")
 
     except NeuroDiffError as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -155,113 +74,736 @@ def analyze(
         raise typer.Exit(1)
 
 
+# ---------------------------------------------------------------------------
+# init-arch-rules command
+# ---------------------------------------------------------------------------
+
+@app.command(name="init-arch-rules")
+def init_arch_rules(
+    output: str = typer.Option(
+        "./arch-rules.yaml",
+        "--output", "-o",
+        help="Path to write the generated arch-rules.yaml",
+    ),
+    detect: bool = typer.Option(
+        True,
+        "--detect/--no-detect",
+        help="Auto-detect project type (Django, FastAPI, plain Python)",
+    ),
+) -> None:
+    """Generate a starter arch-rules.yaml for your project.
+
+    NeuroDiff will auto-detect common project structures (Django, FastAPI,
+    plain Python) and emit a tailored architecture rules file.
+    """
+    output_path = Path(output)
+
+    project_type = "generic"
+    if detect:
+        cwd = Path.cwd()
+        if (cwd / "manage.py").exists():
+            project_type = "django"
+        elif any(cwd.rglob("fastapi")):
+            project_type = "fastapi"
+
+    templates: dict[str, str] = {
+        "django": _DJANGO_ARCH_RULES,
+        "fastapi": _FASTAPI_ARCH_RULES,
+        "generic": _GENERIC_ARCH_RULES,
+    }
+
+    content = templates.get(project_type, _GENERIC_ARCH_RULES)
+    output_path.write_text(content, encoding="utf-8")
+
+    console.print(f"[green]✓ Generated [bold]{output_path}[/bold] ({project_type} template)[/green]")
+    console.print("[dim]Edit the file to match your project's layered architecture.[/dim]")
+
+
+_GENERIC_ARCH_RULES = """\
+# arch-rules.yaml — NeuroDiff Architectural Rules
+# Generated by: neurodiff init-arch-rules
+
+layers:
+  - name: cli
+    patterns: ["cli/*", "main.py"]
+  - name: engines
+    patterns: ["engines/*", "services/*"]
+  - name: core
+    patterns: ["core/*", "domain/*"]
+  - name: output
+    patterns: ["output/*", "views/*"]
+  - name: models
+    patterns: ["models/*", "*/semantic_events.py", "entities/*"]
+
+forbidden_imports:
+  - from: "core"
+    to: "engines"
+    reason: "Core must not depend on engines (DIP)"
+  - from: "core"
+    to: "cli"
+    reason: "Core logic must not know about presentation"
+  - from: "models"
+    to: "core"
+    reason: "Models must stay framework-agnostic"
+"""
+
+_DJANGO_ARCH_RULES = """\
+# arch-rules.yaml — NeuroDiff Architectural Rules (Django)
+# Generated by: neurodiff init-arch-rules --detect
+
+layers:
+  - name: views
+    patterns: ["*/views.py", "*/views/*"]
+  - name: serializers
+    patterns: ["*/serializers.py", "*/serializers/*"]
+  - name: services
+    patterns: ["*/services.py", "*/services/*"]
+  - name: models
+    patterns: ["*/models.py", "*/models/*"]
+  - name: utils
+    patterns: ["*/utils.py", "*/utils/*"]
+
+forbidden_imports:
+  - from: "models"
+    to: "views"
+    reason: "Models must not import from views layer"
+  - from: "models"
+    to: "services"
+    reason: "Models must not depend on service layer"
+"""
+
+_FASTAPI_ARCH_RULES = """\
+# arch-rules.yaml — NeuroDiff Architectural Rules (FastAPI)
+# Generated by: neurodiff init-arch-rules --detect
+
+layers:
+  - name: routers
+    patterns: ["*/routers/*", "*/routes/*", "*/api/*"]
+  - name: services
+    patterns: ["*/services/*", "*/use_cases/*"]
+  - name: repositories
+    patterns: ["*/repositories/*", "*/db/*"]
+  - name: schemas
+    patterns: ["*/schemas/*", "*/models/*"]
+  - name: core
+    patterns: ["*/core/*", "*/config/*"]
+
+forbidden_imports:
+  - from: "schemas"
+    to: "services"
+    reason: "Schemas/DTOs must not depend on business logic"
+  - from: "repositories"
+    to: "routers"
+    reason: "DB layer must not know about HTTP routing"
+"""
+
+
+# ---------------------------------------------------------------------------
+# Config Commands
+# ---------------------------------------------------------------------------
+CONFIG_FILE = Path.home() / ".neurodiff" / "config.json"
+
+@config_app.command("set-api-key")
+def set_api_key(
+    provider: str = typer.Argument(..., help="Provider name (gemini | claude | ollama)")
+) -> None:
+    """Securely save an API key for the LLM Engine."""
+    provider = provider.lower()
+    if provider not in ("gemini", "claude", "ollama"):
+        console.print("[red]Error: Provider must be gemini, claude, or ollama[/red]")
+        raise typer.Exit(1)
+
+    # For ollama, it's a host URL not a key usually, but let's prompt anyway
+    prompt_text = f"Enter API Key for {provider}" if provider != "ollama" else "Enter Ollama Host URL (e.g. http://localhost:11434)"
+    api_key = typer.prompt(prompt_text, hide_input=(provider != "ollama"))
+    
+    config = {}
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except json.JSONDecodeError:
+            pass
+
+    config[f"{provider}_key"] = api_key
+    
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+    
+    console.print(f"[green]✓ Saved configuration for {provider} in {CONFIG_FILE}[/green]")
+
+
+# ---------------------------------------------------------------------------
+# analyze command
+# ---------------------------------------------------------------------------
+
+@app.command()
+def analyze(
+    base_ref: str = typer.Argument(..., help="Base Git reference (commit, branch, tag)"),
+    head_ref: str = typer.Argument(..., help="Head Git reference"),
+    repo_path: str = typer.Option(".", "--repo-path", "-r", help="Path to Git repository"),
+    format_type: _FormatType = typer.Option("terminal", "--format", "-f", help="Output format"),
+    language: _LangType = typer.Option("auto", "--lang", "-l", help="Filter by language"),
+    arch_rules: Optional[str] = typer.Option(
+        None,
+        "--arch-rules",
+        help="Path to arch-rules.yaml (default: auto-discover in repo root)",
+    ),
+    only: Optional[_OnlyType] = typer.Option(
+        None,
+        "--only",
+        help="Run only specific engine: semantic | security | duplication | arch | cognitive | all",
+    ),
+    use_llm: bool = typer.Option(False, "--llm", help="Run Phase 4 LLM deep analysis"),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Force specific LLM provider: gemini | claude | ollama"),
+    llm_only: bool = typer.Option(False, "--llm-only", help="Skip static engines (assumes cached/mocked output if used in isolation, but standard run gathers data first)"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show verbose output (e.g., token usage)"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass LLM cache"),
+    skip_security: bool = typer.Option(False, "--no-security", help="Skip security analysis"),
+    skip_duplication: bool = typer.Option(False, "--no-duplication", help="Skip duplication"),
+    skip_architecture: bool = typer.Option(False, "--no-architecture", help="Skip Phase 2 arch checks"),
+    skip_arch_engine: bool = typer.Option(False, "--no-arch-engine", help="Skip Phase 3 arch engine"),
+    skip_cognitive: bool = typer.Option(False, "--no-cognitive", help="Skip Phase 6 cognitive analysis"),
+    # Phase 5 & 6 — CI/CD
+    strict: bool = typer.Option(False, "--strict", help="Fail pipeline on HIGH severity findings (default: only CRITICAL)"),
+    max_cfi: int = typer.Option(80, "--max-cfi", help="Fail pipeline if Cognitive Fatigue Index exceeds this threshold (Phase 6)"),
+    sarif_output: Optional[str] = typer.Option(None, "--sarif-output", help="Write SARIF v2.1.0 report to this file path"),
+    # Phase 7 — Dashboard & Active Corrections
+    output_html: str = typer.Option("neurodiff-report.html", "--output", help="Path for HTML report"),
+    open_browser: bool = typer.Option(False, "--open", help="Open HTML report in browser"),
+    github_comment: bool = typer.Option(False, "--github-comment", help="Post PR comment via API"),
+    repo_name: Optional[str] = typer.Option(None, "--repo", help="GitHub owner/repo (if not in Actions)"),
+    pr_number: Optional[int] = typer.Option(None, "--pr", help="PR number (if not in Actions)"),
+    corrections: bool = typer.Option(False, "--corrections", help="Generate active code corrections via LLM"),
+    auto_fix: bool = typer.Option(False, "--auto-fix", help="Auto-apply HIGH confidence corrections"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show auto-fix changes without writing"),
+) -> None:
+    """Analyze semantic differences between two Git references.
+
+    NeuroDiff runs four engines in sequence:
+
+    \b
+    Phase 1 — AST Engine:        functions/classes/imports changed
+    Phase 2 — Security Engine:   secrets, injection patterns (semgrep optional)
+    Phase 2 — Duplication:       ChromaDB RAG similarity (requires `neurodiff index`)
+    Phase 3 — Arch Engine:       circular deps, layer violations, SOLID, blast radius
+
+    Examples:
+
+        neurodiff analyze HEAD~1 HEAD
+        neurodiff analyze main feature/auth --format json
+        neurodiff analyze v1.0 v2.0 --arch-rules ./arch-rules.yaml
+        neurodiff analyze HEAD~1 HEAD --only arch
+    """
+    from neurodiff.core.ast_engine import ASTEngine
+    from neurodiff.core.git_parser import GitParser
+    from neurodiff.core.semantic_events import NeuroDiffError, FunctionAdded
+    from neurodiff.engines.arch_engine import ArchEngine
+    from neurodiff.engines.architecture_engine import ArchitectureEngine
+    from neurodiff.engines.cognitive_engine import CognitiveEngine
+    from neurodiff.engines.duplication_engine import DuplicationEngine
+    from neurodiff.engines.llm_engine import ContextBuilder, get_provider, run_llm_analysis
+    from neurodiff.engines.security_engine import SecurityEngine
+    import asyncio
+    import datetime
+
+    if llm_only:
+        use_llm = True
+
+    # --only shortcut: disable everything except the requested engine
+    if only and only != "all":
+        skip_security = only != "security"
+        skip_duplication = only != "duplication"
+        skip_architecture = only not in ("arch",)
+        skip_arch_engine = only not in ("arch", "cognitive")
+        skip_cognitive = only != "cognitive"
+        # "semantic" keeps AST only
+
+    try:
+        repo_path_obj = Path(repo_path).resolve()
+        arch_rules_path = Path(arch_rules) if arch_rules else None
+
+        console.print(
+            f"[bold blue]🧠 NeuroDiff[/bold blue]  "
+            f"[cyan]{base_ref}[/cyan]…[cyan]{head_ref}[/cyan]"
+        )
+
+        git_parser = GitParser(repo_path_obj)
+        ast_engine = ASTEngine()
+
+        security_engine = None if skip_security else SecurityEngine()
+        dup_engine = None if skip_duplication else DuplicationEngine()
+        arch2_engine = None if skip_architecture else ArchitectureEngine()
+        arch3_engine = None if skip_arch_engine else ArchEngine(repo_path_obj, arch_rules_path)
+
+        file_diffs = git_parser.get_file_diffs(base_ref, head_ref)
+        if not file_diffs:
+            console.print("[yellow]No changes found between the specified refs.[/yellow]")
+            raise typer.Exit(0)
+
+        all_events: list = []
+        all_security: list = []
+        all_duplication: list = []
+        all_arch2: list = []
+        added_func_bodies: list[tuple[FunctionAdded, str]] = []
+        file_contents: dict[str, str] = {}
+
+        for fd in file_diffs:
+            if language != "auto" and fd.language != language:
+                continue
+
+            console.print(f"  [dim]→[/dim] [cyan]{fd.path}[/cyan]  [dim]({fd.language})[/dim]")
+
+            if fd.content_after.strip():
+                file_contents[fd.path] = fd.content_after
+
+            # Phase 1 — AST
+            events: list = []
+            try:
+                events = ast_engine.extract_events(
+                    fd.content_before, fd.content_after, fd.language, fd.path
+                )
+                all_events.extend(events)
+                for ev in events:
+                    if isinstance(ev, FunctionAdded):
+                        body = ast_engine._extract_function_body(
+                            fd.content_after,
+                            ev.start_line - 1,
+                            ev.start_line + ev.body_lines - 2,
+                        )
+                        added_func_bodies.append((ev, body))
+            except Exception as exc:
+                console.print(f"    [yellow]⚠ AST: {exc}[/yellow]")
+
+            # Phase 2 — Security
+            if security_engine:
+                try:
+                    all_security.extend(security_engine.analyze(fd.content_after, fd.path, events))
+                except Exception as exc:
+                    console.print(f"    [yellow]⚠ Security: {exc}[/yellow]")
+
+            # Phase 2 — Architecture heuristics (architecture_engine.py)
+            if arch2_engine:
+                try:
+                    all_arch2.extend(arch2_engine.analyze(events, {fd.path: fd.content_after}))
+                except Exception as exc:
+                    console.print(f"    [yellow]⚠ Arch-2: {exc}[/yellow]")
+
+        # Phase 2 — Duplication (across all files)
+        all_dup_findings: list = []
+        if dup_engine and added_func_bodies:
+            if not dup_engine.has_chromadb:
+                console.print(
+                    "[yellow]⚠ Duplication skipped — ChromaDB unavailable. "
+                    "Run [bold]neurodiff index .[/bold] first.[/yellow]"
+                )
+            else:
+                try:
+                    all_dup_findings = dup_engine.analyze(added_func_bodies)
+                except Exception as exc:
+                    console.print(f"[yellow]⚠ Duplication: {exc}[/yellow]")
+
+        # Phase 3 — Arch Engine
+        arch_report = None
+        dependency_graph = None
+        if arch3_engine:
+            try:
+                diff_files = [fd.path for fd in file_diffs]
+                arch_report = arch3_engine.run(diff_files, all_events)
+                dependency_graph = arch3_engine.graph
+            except Exception as exc:
+                console.print(f"[yellow]⚠ Arch engine: {exc}[/yellow]")
+
+        # Phase 6 — Cognitive Engine
+        cognitive_report = None
+        if not skip_cognitive:
+            try:
+                cog_engine = CognitiveEngine()
+                cognitive_report = cog_engine.run(
+                    semantic_events=all_events,
+                    file_diffs=file_diffs,
+                    arch_report=arch_report,
+                    dependency_graph=dependency_graph,
+                )
+            except Exception as exc:
+                console.print(f"[yellow]⚠ Cognitive engine failed: {exc}[/yellow]")
+
+        # Phase 4 — LLM Deep Analysis
+        llm_report = None
+        if use_llm:
+            provider = get_provider(llm_provider)
+            if not provider:
+                console.print("[yellow]⚠ LLM Engine skipped: No valid provider configured (set ANTHROPIC_API_KEY, GOOGLE_API_KEY, or OLLAMA_HOST).[/yellow]")
+            else:
+                console.print(f"[cyan]Running LLM Analysis via {provider.name}…[/cyan]")
+                repo_stats = {
+                    "files_changed": len(file_diffs),
+                    "total_events": len(all_events)
+                }
+                diff_metadata = {
+                    "base_ref": base_ref,
+                    "head_ref": head_ref,
+                    "timestamp": datetime.datetime.now().isoformat()
+                }
+                
+                llm_context = ContextBuilder.build(
+                    events=all_events,
+                    security=all_security,
+                    duplication=all_dup_findings,
+                    arch_report=arch_report,
+                    repo_stats=repo_stats,
+                    diff_metadata=diff_metadata,
+                    cognitive_report=cognitive_report,
+                )
+                if verbose and llm_context.truncated:
+                    console.print("[yellow]⚠ LLM context was truncated to fit the token limit.[/yellow]")
+                
+                try:
+                    llm_report = asyncio.run(run_llm_analysis(llm_context, provider, use_cache=not no_cache))
+                    if llm_report.error:
+                        console.print(f"[red]LLM Engine Error: {llm_report.error}[/red]")
+                except Exception as exc:
+                    console.print(f"[red]LLM Engine critical failure: {exc}[/red]")
+
+        # Phase 7 — Active Corrections
+        global_context = None
+        code_corrections = []
+        if corrections and use_llm and provider:
+            from neurodiff.engines.context_engine import ContextEngine
+            from neurodiff.engines.correction_engine import CorrectionEngine, CorrectionRequest
+            import asyncio
+            
+            console.print("[cyan]Building Global Context & Generating active corrections…[/cyan]")
+            ctx_engine = ContextEngine(repo_path_obj)
+            findings_to_query = all_security + getattr(arch_report, "circular_deps", []) + getattr(arch_report, "layer_violations", [])
+            global_context = ctx_engine.build_context(
+                dependency_graph=dependency_graph,
+                layer_names=[layer.get("name") for layer in getattr(arch3_engine, "layer_config", {}).get("layers", [])] if arch3_engine else None,
+                duplication_engine=dup_engine,
+                findings_to_query=findings_to_query
+            )
+            
+            requests = []
+            for f in all_security:
+                if getattr(f, "severity", "") in ["high", "critical"]:
+                    req = CorrectionRequest(
+                        finding_id=getattr(f, "rule_id", "security_issue"),
+                        finding_type="security",
+                        severity=getattr(f, "severity", "high"),
+                        file_path=getattr(f, "file", "unknown"),
+                        function_name=getattr(f, "function_name", None),
+                        original_code=file_contents.get(getattr(f, "file", ""), ""),
+                        finding_description=getattr(f, "description", ""),
+                        global_context=global_context
+                    )
+                    requests.append(req)
+                    
+            corr_engine = CorrectionEngine(provider=provider)
+            code_corrections = asyncio.run(corr_engine.generate_all_corrections(requests))
+            
+            if auto_fix or dry_run:
+                from neurodiff.engines.correction_engine import apply_correction
+                for corr in code_corrections:
+                    if corr.confidence > 0.8:
+                        if not auto_fix and dry_run:
+                            apply_correction(corr, repo_path_obj, dry_run=True)
+                            console.print(f"[yellow]Dry-run: Would apply patch for {corr.finding_id}[/yellow]")
+                        elif auto_fix:
+                            success = apply_correction(corr, repo_path_obj, dry_run=False)
+                            if success:
+                                console.print(f"[green]✓ Applied patch for {corr.finding_id}[/green]")
+                            else:
+                                console.print(f"[red]✗ Failed to apply patch for {corr.finding_id}[/red]")
+
+        console.print()
+
+        if format_type == "json":
+            _output_json(all_events, all_security, all_dup_findings, all_arch2, arch_report, llm_report, cognitive_report)
+        elif format_type in ["terminal", "all"]:
+            from neurodiff.output.reporter import Reporter
+            reporter = Reporter(console)
+            reporter.report(
+                str(repo_path_obj),
+                base_ref,
+                head_ref,
+                len(file_diffs),
+                all_events,
+                all_security,
+                all_dup_findings,
+                all_arch2,
+                arch_report=arch_report,
+                llm_report=llm_report,
+                cognitive_report=cognitive_report,
+                verbose=verbose,
+            )
+
+        # Phase 5 — SARIF output
+        if sarif_output or format_type == "all":
+            from neurodiff.output.sarif_formatter import build_sarif
+            import json as _json
+            sarif_doc = build_sarif(all_security, all_dup_findings, arch_report)
+            sarif_path = Path(sarif_output if sarif_output else "neurodiff-report.sarif")
+            sarif_path.write_text(_json.dumps(sarif_doc, indent=2), encoding="utf-8")
+            console.print(f"[green]✓ SARIF report written to {sarif_path}[/green]")
+
+        # Phase 7 — HTML Report
+        if format_type in ["html", "all"]:
+            from neurodiff.output.html_reporter import generate_html, FullReport
+            import time
+            full_report = FullReport(
+                metadata={
+                    "repo": repo_path_obj.name,
+                    "base_ref": base_ref,
+                    "head_ref": head_ref,
+                    "duration_s": 1.0,
+                },
+                semantic_events=all_events,
+                security=all_security,
+                duplication=all_dup_findings,
+                arch=arch_report,
+                cognitive=cognitive_report,
+                llm=llm_report,
+                global_context=global_context,
+                corrections=code_corrections
+            )
+            html_content = generate_html(full_report)
+            Path(output_html).write_text(html_content, encoding="utf-8")
+            console.print(f"[green]✓ HTML report written to {output_html}[/green]")
+            
+            if open_browser:
+                import webbrowser
+                webbrowser.open(str(Path(output_html).resolve()))
+
+        # Phase 7 — GitHub PR comment
+        if github_comment:
+            from neurodiff.output.github_commenter import post_pr_comment, get_pr_number, get_repo
+            import os
+            import asyncio
+            
+            gh_token = os.environ.get("GITHUB_TOKEN", "")
+            final_repo = repo_name or get_repo()
+            final_pr = pr_number or get_pr_number()
+            
+            if not final_repo or not final_pr:
+                console.print("[yellow]⚠ --github-comment skipped: Could not determine repo or PR number.[/yellow]")
+            else:
+                from neurodiff.output.html_reporter import FullReport
+                report_payload = FullReport(
+                    metadata={
+                        "repo": repo_path_obj.name,
+                        "base_ref": base_ref,
+                        "head_ref": head_ref,
+                        "duration_s": 1.0,
+                    },
+                    semantic_events=all_events,
+                    security=all_security,
+                    duplication=all_dup_findings,
+                    arch=arch_report,
+                    cognitive=cognitive_report,
+                    llm=llm_report,
+                    global_context=global_context,
+                    corrections=code_corrections
+                )
+                
+                async def _post_comment() -> None:
+                    ok = await post_pr_comment(report_payload, gh_token, final_repo, final_pr)
+                    if ok:
+                        console.print(f"[green]✓ NeuroDiff comment posted/updated in PR #{final_pr}[/green]")
+                    else:
+                        console.print(f"[red]✗ Failed to post PR comment (check token / permissions).[/red]")
+                asyncio.run(_post_comment())
+
+        # Phase 5 — Exit codes
+        is_safe = _compute_is_safe(all_security, arch_report, llm_report, cognitive_report, strict, max_cfi)
+        if not is_safe:
+            raise typer.Exit(1)
+
+
+    except typer.Exit:
+        raise
+    except NeuroDiffError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Unexpected error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Exit code helper (Phase 5)
+# ---------------------------------------------------------------------------
+
+def _compute_is_safe(
+    security_findings: list,
+    arch_report: Any,
+    llm_report: Any,
+    cognitive_report: Any | None = None,
+    strict: bool = False,
+    max_cfi: int = 80,
+) -> bool:
+    """Determine if the diff is safe to merge for CI/CD exit code purposes."""
+    if cognitive_report and cognitive_report.fatigue_index.total_score > max_cfi:
+        return False
+
+    # If LLM ran, trust its judgment exclusively
+    if llm_report is not None and not llm_report.error:
+        es = llm_report.executive_summary
+        if isinstance(es, dict) and "safe_to_merge" in es:
+            return bool(es["safe_to_merge"])
+
+    # No LLM: use static severity threshold
+    fail_severities = {"critical", "high"} if strict else {"critical"}
+    for f in security_findings:
+        if getattr(f, "severity", "").lower() in fail_severities:
+            return False
+    if arch_report:
+        for f in arch_report.circular_deps + arch_report.layer_violations:
+            if getattr(f, "severity", "").lower() in fail_severities:
+                return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# JSON output helper
+# ---------------------------------------------------------------------------
+
 def _output_json(
     semantic_events: list,
     security_findings: list,
     duplication_findings: list,
+    architecture_findings: list,
+    arch_report,
+    llm_report = None,
+    cognitive_report = None,
 ) -> None:
-    """Output analysis results as JSON.
-
-    Args:
-        semantic_events: List of semantic events.
-        security_findings: List of security findings.
-        duplication_findings: List of duplication findings.
-    """
-    import json
-
     from neurodiff.core.semantic_events import (
-        ClassAdded,
-        ClassModified,
-        FunctionAdded,
-        FunctionModified,
-        FunctionRemoved,
-        ImportAdded,
-        ImportRemoved,
+        ClassAdded, ClassModified,
+        FunctionAdded, FunctionModified, FunctionRemoved,
+        ImportAdded, ImportRemoved,
     )
 
-    def event_to_dict(event) -> dict:
-        """Convert semantic event to dictionary."""
-        if isinstance(event, FunctionAdded):
+    def event_to_dict(e) -> dict:
+        if isinstance(e, FunctionAdded):
             return {
-                "type": "FunctionAdded",
-                "name": event.name,
-                "language": event.language,
-                "line_start": event.line_start,
-                "line_end": event.line_end,
-                "cyclomatic_complexity": event.cyclomatic_complexity,
+                "type": "FunctionAdded", "name": e.name, "file": e.file,
+                "start_line": e.start_line, "body_lines": e.body_lines,
+                "calls": e.calls, "cyclomatic_complexity": e.cyclomatic_complexity,
             }
-        elif isinstance(event, FunctionModified):
+        if isinstance(e, FunctionModified):
             return {
-                "type": "FunctionModified",
-                "name": event.name,
-                "language": event.language,
-                "complexity_before": event.complexity_before,
-                "complexity_after": event.complexity_after,
-                "changes_summary": event.changes_summary,
+                "type": "FunctionModified", "name": e.name, "file": e.file,
+                "start_line": e.start_line, "lines_before": e.lines_before,
+                "lines_after": e.lines_after, "signature_changed": e.signature_changed,
+                "calls_added": e.calls_added, "calls_removed": e.calls_removed,
+                "complexity_before": e.complexity_before, "complexity_after": e.complexity_after,
             }
-        elif isinstance(event, FunctionRemoved):
+        if isinstance(e, FunctionRemoved):
+            return {"type": "FunctionRemoved", "name": e.name, "file": e.file}
+        if isinstance(e, ClassAdded):
             return {
-                "type": "FunctionRemoved",
-                "name": event.name,
-                "language": event.language,
-                "cyclomatic_complexity": event.cyclomatic_complexity,
+                "type": "ClassAdded", "name": e.name, "file": e.file,
+                "methods": e.methods, "inherits_from": e.inherits_from,
             }
-        elif isinstance(event, ClassAdded):
+        if isinstance(e, ClassModified):
             return {
-                "type": "ClassAdded",
-                "name": event.name,
-                "language": event.language,
-                "methods": event.methods,
+                "type": "ClassModified", "name": e.name, "file": e.file,
+                "methods_added": e.methods_added, "methods_removed": e.methods_removed,
             }
-        elif isinstance(event, ClassModified):
-            return {
-                "type": "ClassModified",
-                "name": event.name,
-                "language": event.language,
-                "methods_added": event.methods_added,
-                "methods_removed": event.methods_removed,
-                "methods_modified": event.methods_modified,
-            }
-        elif isinstance(event, ImportAdded):
-            return {
-                "type": "ImportAdded",
-                "module": event.module,
-                "language": event.language,
-                "line": event.line,
-            }
-        elif isinstance(event, ImportRemoved):
-            return {
-                "type": "ImportRemoved",
-                "module": event.module,
-                "language": event.language,
-                "line": event.line,
-            }
+        if isinstance(e, ImportAdded):
+            return {"type": "ImportAdded", "module": e.module, "file": e.file, "symbols": e.symbols}
+        if isinstance(e, ImportRemoved):
+            return {"type": "ImportRemoved", "module": e.module, "file": e.file}
         return {}
 
-    output = {
+    output: dict = {
         "semantic_events": [event_to_dict(e) for e in semantic_events],
         "security_findings": [
             {
-                "rule_id": f.rule_id,
-                "title": f.title,
-                "severity": f.severity.value,
-                "file_path": f.file_path,
-                "line": f.line,
+                "rule_id": f.rule_id, "category": f.category,
+                "description": f.description, "severity": f.severity,
+                "file": f.file, "line": f.line, "function_name": f.function_name,
             }
             for f in security_findings
         ],
         "duplication_findings": [
             {
-                "source_file": f.source_file,
-                "target_file": f.target_file,
-                "similarity": f.similarity,
-                "severity": f.severity,
+                "new_function": f.new_function, "new_file": f.new_file,
+                "similar_function": f.similar_function, "similar_file": f.similar_file,
+                "similarity_score": round(f.similarity_score, 4), "severity": f.severity,
             }
             for f in duplication_findings
         ],
+        "architecture_findings": [
+            {
+                "rule_id": f.rule_id, "title": f.title, "description": f.description,
+                "severity": f.severity, "file": f.file, "entity_name": f.entity_name,
+                "suggestion": f.suggestion,
+            }
+            for f in architecture_findings
+        ],
     }
 
+    if arch_report is not None:
+        output["arch_report"] = {
+            "layer_violations": [
+                {"severity": f.severity, "category": f.category, "file": f.file,
+                 "description": f.description, "involved_modules": f.involved_modules}
+                for f in arch_report.layer_violations
+            ],
+            "circular_deps": [
+                {"severity": f.severity, "description": f.description,
+                 "involved_modules": f.involved_modules}
+                for f in arch_report.circular_deps
+            ],
+            "solid_findings": [
+                {"principle": f.principle, "severity": f.severity, "file": f.file,
+                 "entity": f.entity, "description": f.description}
+                for f in arch_report.solid_findings
+            ],
+            "blast_radius": arch_report.blast_radius,
+        }
+
+    if cognitive_report is not None:
+        from dataclasses import asdict
+        try:
+            output["cognitive_report"] = asdict(cognitive_report)
+        except Exception:
+            output["cognitive_report"] = "Error serializing cognitive report"
+
+    if llm_report is not None:
+        output["llm_report"] = {
+            "provider": llm_report.provider_used,
+            "executive_summary": llm_report.executive_summary,
+            "pattern_analysis": llm_report.pattern_analysis,
+            "fix_plan": llm_report.fix_plan,
+            "error": llm_report.error,
+        }
+
     console.print(json.dumps(output, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Apply command (Phase 7)
+# ---------------------------------------------------------------------------
+@app.command()
+def apply(
+    finding_id: str = typer.Option(..., "--finding-id", help="ID of the finding to apply correction for"),
+    repo_path: str = typer.Option(".", "--repo-path", "-r", help="Path to Git repository"),
+) -> None:
+    """Apply a downloaded .patch for a specific finding."""
+    patch_file = Path(f"{finding_id}.patch")
+    if not patch_file.exists():
+        console.print(f"[red]Patch file {patch_file} not found in current directory.[/red]")
+        raise typer.Exit(1)
+        
+    import subprocess
+    cmd = ["git", "apply", str(patch_file)]
+    result = subprocess.run(cmd, cwd=str(Path(repo_path).resolve()), capture_output=True, text=True)
+    if result.returncode == 0:
+        console.print(f"[green]✓ Applied correction for {finding_id}[/green]")
+    else:
+        console.print(f"[red]✗ Failed to apply correction for {finding_id}: {result.stderr}[/red]")
 
 
 if __name__ == "__main__":

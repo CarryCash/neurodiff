@@ -1,0 +1,118 @@
+name: "NeuroDiff — AI Code Review"
+description: "Semantic git diff analysis for AI-generated code. Detects security issues, architectural violations, and code duplication via AST analysis and optional LLM deep reasoning."
+author: "NeuroDiff Contributors"
+
+branding:
+  icon: "cpu"
+  color: "purple"
+
+inputs:
+  base-ref:
+    description: "Base Git reference (e.g. HEAD~1 or the base branch SHA)"
+    required: false
+    default: "HEAD~1"
+  head-ref:
+    description: "Head Git reference (e.g. HEAD or current commit SHA)"
+    required: false
+    default: "HEAD"
+  arch-rules:
+    description: "Path to arch-rules.yaml file (optional)"
+    required: false
+    default: ""
+  use-llm:
+    description: "Enable Phase 4 LLM deep analysis (requires API key)"
+    required: false
+    default: "false"
+  llm-provider:
+    description: "LLM provider to use: gemini | claude | ollama (auto-detected if not set)"
+    required: false
+    default: ""
+  strict:
+    description: "Fail on HIGH severity findings (default: fail only on CRITICAL)"
+    required: false
+    default: "false"
+  sarif-output:
+    description: "Path to write SARIF v2.1.0 output (for GitHub Security tab)"
+    required: false
+    default: "neurodiff.sarif"
+  post-pr-comment:
+    description: "Post analysis summary as a PR comment"
+    required: false
+    default: "true"
+  python-version:
+    description: "Python version to use"
+    required: false
+    default: "3.11"
+
+outputs:
+  sarif-file:
+    description: "Path to the generated SARIF file"
+    value: ${{ steps.analyze.outputs.sarif-file }}
+  is-safe:
+    description: "true if the diff is safe to merge, false otherwise"
+    value: ${{ steps.analyze.outputs.is-safe }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install NeuroDiff
+      shell: bash
+      run: |
+        pip install --quiet "neurodiff @ file://${{ github.action_path }}"
+
+    - name: Run NeuroDiff Analysis
+      id: analyze
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ env.GITHUB_TOKEN }}
+        GOOGLE_API_KEY: ${{ env.GOOGLE_API_KEY }}
+        ANTHROPIC_API_KEY: ${{ env.ANTHROPIC_API_KEY }}
+        OLLAMA_HOST: ${{ env.OLLAMA_HOST }}
+      run: |
+        ARGS="${{ inputs.base-ref }} ${{ inputs.head-ref }}"
+        ARGS="$ARGS --sarif-output ${{ inputs.sarif-output }}"
+
+        if [[ "${{ inputs.arch-rules }}" != "" ]]; then
+          ARGS="$ARGS --arch-rules ${{ inputs.arch-rules }}"
+        fi
+
+        if [[ "${{ inputs.use-llm }}" == "true" ]]; then
+          ARGS="$ARGS --llm"
+          if [[ "${{ inputs.llm-provider }}" != "" ]]; then
+            ARGS="$ARGS --llm-provider ${{ inputs.llm-provider }}"
+          fi
+        fi
+
+        if [[ "${{ inputs.strict }}" == "true" ]]; then
+          ARGS="$ARGS --strict"
+        fi
+
+        if [[ "${{ inputs.post-pr-comment }}" == "true" ]]; then
+          ARGS="$ARGS --post-pr-comment"
+        fi
+
+        # Run analysis — exit code 0 = safe, 1 = not safe
+        set +e
+        neurodiff analyze $ARGS
+        EXIT_CODE=$?
+        set -e
+
+        echo "sarif-file=${{ inputs.sarif-output }}" >> "$GITHUB_OUTPUT"
+        if [[ $EXIT_CODE -eq 0 ]]; then
+          echo "is-safe=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "is-safe=false" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
+        fi
+
+    - name: Upload SARIF to GitHub Security Tab
+      uses: github/codeql-action/upload-sarif@v3
+      if: always() && inputs.sarif-output != ''
+      with:
+        sarif_file: ${{ inputs.sarif-output }}
+        category: "neurodiff"

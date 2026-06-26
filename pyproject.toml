@@ -40,7 +40,9 @@ dependencies = [
     "tree-sitter-languages>=1.10",
     "chromadb>=0.5",
     "sentence-transformers>=3.0",
-    "semgrep>=1.70",
+    "networkx>=3.3",
+    "pyyaml>=6.0",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +52,12 @@ dev = [
     "black>=23.0",
     "isort>=5.0",
     "mypy>=1.0",
+    "pytest-asyncio>=0.21.0",
+]
+# semgrep only works on Linux/macOS (or Windows WSL)
+# Install separately: pip install semgrep  (Linux/WSL only)
+security = [
+    "semgrep>=1.70",
 ]
 
 [project.scripts]
@@ -67,7 +75,7 @@ profile = "black"
 line_length = 88
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false

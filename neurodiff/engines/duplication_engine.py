@@ -1,21 +1,22 @@
 """Code duplication detection engine."""
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
+from typing import Literal
 from pathlib import Path
+
+from neurodiff.core.semantic_events import FunctionAdded
 
 
 @dataclass
 class DuplicationFinding:
     """Represents a code duplication finding."""
-
-    source_file: str
-    target_file: str
-    source_snippet: str
-    target_snippet: str
-    similarity: float
-    severity: str
+    new_function: str
+    new_file: str
+    similar_function: str
+    similar_file: str
+    similarity_score: float
+    severity: Literal["high", "medium"]
 
 
 class DuplicationEngine:
@@ -23,6 +24,7 @@ class DuplicationEngine:
 
     SIMILARITY_THRESHOLD = 0.80
     CHROMA_DB_PATH = Path.home() / ".neurodiff" / "chroma_db"
+    EXCLUDED_DIRS = {".git", "node_modules", "__pycache__", "venv", "env", ".venv"}
 
     def __init__(self) -> None:
         """Initialize the DuplicationEngine."""
@@ -34,14 +36,9 @@ class DuplicationEngine:
             self._initialize_chromadb()
 
     def _check_chromadb(self) -> bool:
-        """Check if ChromaDB is available.
-
-        Returns:
-            True if ChromaDB is installed and available.
-        """
+        """Check if ChromaDB is available."""
         try:
             import chromadb
-
             return True
         except ImportError:
             return False
@@ -50,32 +47,95 @@ class DuplicationEngine:
         """Initialize ChromaDB client and collection."""
         try:
             import chromadb
-
-            # Create database directory if it doesn't exist
             self.CHROMA_DB_PATH.mkdir(parents=True, exist_ok=True)
-
-            # Initialize ChromaDB client
             self.client = chromadb.PersistentClient(path=str(self.CHROMA_DB_PATH))
-
-            # Get or create collection
             self.collection = self.client.get_or_create_collection(
                 name="code_snippets",
                 metadata={"hnsw:space": "cosine"},
             )
         except Exception:
-            # Graceful degradation
             self.has_chromadb = False
 
+    def _get_language_from_ext(self, file_path: Path) -> str | None:
+        ext = file_path.suffix.lower()
+        if ext == ".py":
+            return "python"
+        elif ext == ".js":
+            return "javascript"
+        elif ext == ".ts":
+            return "typescript"
+        return None
+
+    def index_repo(self, repo_path: Path, ast_engine) -> int:
+        """Index all functions in the repository."""
+        if not self.has_chromadb or not self.collection:
+            raise Exception("ChromaDB is not available. Please install it first.")
+
+        try:
+            from sentence_transformers import SentenceTransformer
+            model = SentenceTransformer("all-MiniLM-L6-v2")
+        except ImportError as e:
+            raise Exception("sentence-transformers not installed.") from e
+
+        count = 0
+        repo_path = repo_path.resolve()
+
+        for file_path in repo_path.rglob("*"):
+            if file_path.is_dir():
+                continue
+            
+            # Check exclusions
+            if any(part in self.EXCLUDED_DIRS for part in file_path.parts):
+                continue
+
+            lang = self._get_language_from_ext(file_path)
+            if not lang:
+                continue
+
+            try:
+                content = file_path.read_text(encoding="utf-8")
+                tree = ast_engine._parse_code(content, lang)
+                functions = ast_engine._extract_functions(tree, lang)
+                
+                for func_name, info in functions.items():
+                    func_body = ast_engine._extract_function_body(
+                        content, info["start_line"], info["end_line"]
+                    )
+                    
+                    if not func_body.strip():
+                        continue
+
+                    embedding = model.encode(func_body).tolist()
+                    rel_path = str(file_path.relative_to(repo_path))
+                    
+                    doc_id = f"{rel_path}:{func_name}"
+                    
+                    self.collection.add(
+                        ids=[doc_id],
+                        embeddings=[embedding],
+                        documents=[func_body],
+                        metadatas=[
+                            {
+                                "file": rel_path,
+                                "function_name": func_name,
+                                "language": lang,
+                            }
+                        ],
+                    )
+                    count += 1
+            except Exception:
+                # Ignore unreadable files or parsing errors
+                pass
+
+        return count
+
     def analyze(
-        self, snippets: list[tuple[str, str]]
+        self, added_functions: list[tuple[FunctionAdded, str]]
     ) -> list[DuplicationFinding]:
-        """Analyze snippets for duplication.
-
+        """Analyze newly added functions for duplication.
+        
         Args:
-            snippets: List of (file_path, code_snippet) tuples.
-
-        Returns:
-            List of duplication findings.
+            added_functions: List of (FunctionAdded event, function_body code) tuples.
         """
         findings: list[DuplicationFinding] = []
 
@@ -83,136 +143,66 @@ class DuplicationEngine:
             return findings
 
         try:
-            findings.extend(self._find_duplicates_with_chromadb(snippets))
+            findings.extend(self._find_duplicates_with_chromadb(added_functions))
         except Exception:
-            # Graceful degradation
             pass
 
         return findings
 
     def _find_duplicates_with_chromadb(
-        self, snippets: list[tuple[str, str]]
+        self, added_functions: list[tuple[FunctionAdded, str]]
     ) -> list[DuplicationFinding]:
-        """Find duplicate code snippets using ChromaDB.
-
-        Args:
-            snippets: List of (file_path, code_snippet) tuples.
-
-        Returns:
-            List of duplication findings.
-        """
+        """Find duplicate code snippets using ChromaDB."""
         findings: list[DuplicationFinding] = []
 
         try:
             from sentence_transformers import SentenceTransformer
-
-            # Load embedding model
             model = SentenceTransformer("all-MiniLM-L6-v2")
 
-            # Index current snippets
-            for idx, (file_path, snippet) in enumerate(snippets):
-                if not snippet.strip():
-                    continue
-
-                # Generate embedding
-                embedding = model.encode(snippet).tolist()
-
-                # Add to collection
-                self.collection.add(
-                    ids=[f"{file_path}_{idx}"],
-                    embeddings=[embedding],
-                    documents=[snippet],
-                    metadatas=[
-                        {
-                            "file_path": file_path,
-                            "snippet": snippet[:100],  # Store preview
-                        }
-                    ],
-                )
-
-            # Query for similar snippets
-            for idx, (file_path, snippet) in enumerate(snippets):
+            for event, snippet in added_functions:
                 if not snippet.strip():
                     continue
 
                 embedding = model.encode(snippet).tolist()
 
-                # Find similar snippets
+                # pyrefly: ignore [missing-attribute]
                 results = self.collection.query(
                     query_embeddings=[embedding],
-                    n_results=5,  # Get top 5 similar snippets
+                    n_results=3,
                 )
 
                 if results and results["ids"] and len(results["ids"]) > 0:
                     for result_idx, (result_id, distance) in enumerate(
                         zip(results["ids"][0], results["distances"][0])
                     ):
-                        # Skip the exact same snippet
-                        if result_id == f"{file_path}_{idx}":
+                        metadata = (
+                            results["metadatas"][0][result_idx]
+                            if results["metadatas"] and result_idx < len(results["metadatas"][0])
+                            else {}
+                        )
+
+                        target_file = metadata.get("file", "unknown")
+                        target_function = metadata.get("function_name", "unknown")
+
+                        # Skip the exact same function in the same file
+                        if target_file == event.file and target_function == event.name:
                             continue
 
-                        # Calculate similarity (distance is actually similarity in cosine space)
-                        similarity = 1 - distance if distance else 0
+                        similarity = min(1.0, max(0.0, 1.0 - distance)) if distance is not None else 0.0
 
                         if similarity >= self.SIMILARITY_THRESHOLD:
-                            # Extract metadata
-                            metadata = (
-                                results["metadatas"][0][result_idx]
-                                if results["metadatas"] and result_idx < len(results["metadatas"][0])
-                                else {}
-                            )
-
                             finding = DuplicationFinding(
-                                source_file=file_path,
-                                target_file=metadata.get("file_path", "unknown"),
-                                source_snippet=snippet[:200],
-                                target_snippet=metadata.get(
-                                    "snippet", "..."
-                                )[:200],
-                                similarity=similarity,
-                                severity="MEDIUM"
-                                if similarity < 0.95
-                                else "HIGH",
+                                new_function=event.name,
+                                new_file=event.file,
+                                similar_function=target_function,
+                                similar_file=target_file,
+                                similarity_score=similarity,
+                                severity="high" if similarity > 0.90 else "medium",
                             )
                             findings.append(finding)
         except ImportError:
-            # Graceful degradation if sentence-transformers not available
             pass
         except Exception:
-            # Graceful degradation
             pass
 
         return findings
-
-    def store_snapshot(self, snippets: list[tuple[str, str]], run_id: str) -> None:
-        """Store a snapshot of analyzed snippets for future comparison.
-
-        Args:
-            snippets: List of (file_path, code_snippet) tuples.
-            run_id: Identifier for this analysis run.
-        """
-        try:
-            metadata_file = self.CHROMA_DB_PATH / f"snapshot_{run_id}.json"
-            snapshot_data = [
-                {"file_path": file_path, "snippet": snippet}
-                for file_path, snippet in snippets
-            ]
-            with open(metadata_file, "w") as f:
-                json.dump(snapshot_data, f)
-        except Exception:
-            # Graceful degradation
-            pass
-
-    def clear_database(self) -> None:
-        """Clear the ChromaDB database."""
-        try:
-            if self.client and hasattr(self.client, "_system"):
-                # Delete and recreate collection
-                self.client.delete_collection(name="code_snippets")
-                self.collection = self.client.get_or_create_collection(
-                    name="code_snippets",
-                    metadata={"hnsw:space": "cosine"},
-                )
-        except Exception:
-            # Graceful degradation
-            pass

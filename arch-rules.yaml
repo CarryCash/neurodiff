@@ -1,0 +1,46 @@
+# arch-rules.yaml — NeuroDiff Architectural Rules
+#
+# This file defines the layered architecture model for your project.
+# NeuroDiff uses this to detect layer violations and forbidden imports in diffs.
+#
+# Run `neurodiff init-arch-rules` to auto-generate a starter for your project type.
+#
+# Layer order matters: index 0 = top (CLI/presentation), higher index = lower (domain).
+# A module at index N must NOT import from a module at index > N.
+
+layers:
+  - name: cli
+    patterns:
+      - "cli/*"
+      - "main.py"
+
+  - name: engines
+    patterns:
+      - "engines/*"
+
+  - name: core
+    patterns:
+      - "core/*"
+
+  - name: output
+    patterns:
+      - "output/*"
+
+  - name: models
+    patterns:
+      - "models/*"
+      - "*/semantic_events.py"
+
+# Explicitly forbidden import pairs (checked independently of layer order)
+forbidden_imports:
+  - from: "core"
+    to: "engines"
+    reason: "Core must not depend on engines (Dependency Inversion Principle)"
+
+  - from: "core"
+    to: "cli"
+    reason: "Core logic must not know about the presentation layer"
+
+  - from: "models"
+    to: "core"
+    reason: "Model/event definitions must remain framework-agnostic"
