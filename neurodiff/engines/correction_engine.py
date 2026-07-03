@@ -82,7 +82,7 @@ Respond ONLY in this JSON format, no preamble, no markdown fences:
     def __init__(self, provider: LLMProvider | None = None):
         self.provider = provider
         # Semaphore to cap concurrent requests
-        self._semaphore = asyncio.Semaphore(10)
+        self._semaphore = asyncio.Semaphore(3)
 
     async def generate_all_corrections(
         self, requests: list[CorrectionRequest]
@@ -189,7 +189,9 @@ def apply_correction(correction: CodeCorrection, repo_path: Path, dry_run: bool 
             cmd,
             cwd=str(repo_path),
             capture_output=True,
-            text=True
+            text=True,
+            encoding="utf-8",
+            errors="replace"
         )
         return result.returncode == 0
     finally:

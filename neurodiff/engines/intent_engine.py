@@ -45,9 +45,11 @@ def extract_intent(repo_path: Path, head_ref: str) -> CommitIntent:
             cwd=repo_path,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True
         )
-        commit_msg = result.stdout.strip()
+        commit_msg = (result.stdout or "").strip()
     except subprocess.CalledProcessError:
         commit_msg = "No commit message found."
 

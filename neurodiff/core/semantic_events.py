@@ -55,6 +55,11 @@ class ClassModified:
     methods_added: list[str]
     methods_removed: list[str]
 
+@dataclass
+class ClassRemoved:
+    name: str
+    file: str
+
 
 @dataclass
 class ImportAdded:
@@ -75,6 +80,7 @@ SemanticEvent = Union[
     FunctionRemoved,
     ClassAdded,
     ClassModified,
+    ClassRemoved,
     ImportAdded,
     ImportRemoved,
 ]

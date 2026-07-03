@@ -199,11 +199,13 @@ def set_cached(key: str, report: LLMReport) -> None:
 
 class LLMProvider(Protocol):
     name: str
+    delay: float
+    lock: asyncio.Lock
     async def complete(self, system: str, user: str) -> str: ...
 
 def parse_json_response(text: str) -> dict:
     """Strip markdown fences and parse JSON."""
-    text = text.strip()
+    text = (text or "").strip()
     # Remove markdown code blocks if present
     text = re.sub(r"^```(?:json)?", "", text)
     text = re.sub(r"```$", "", text).strip()
@@ -216,11 +218,14 @@ def parse_json_response(text: str) -> dict:
 class ClaudeProvider:
     name = "claude"
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, delay: float = 2.0):
         self.api_key = api_key
         self.url = "https://api.anthropic.com/v1/messages"
         self.model = "claude-3-5-haiku-20241022"
+        self.delay = delay
+        self.lock = asyncio.Lock()
 
+    # pyrefly: ignore [bad-return]
     async def complete(self, system: str, user: str) -> str:
         headers = {
             "x-api-key": self.api_key,
@@ -234,42 +239,89 @@ class ClaudeProvider:
             "messages": [{"role": "user", "content": user}],
             "temperature": 0.1,
         }
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(self.url, headers=headers, json=data)
-            resp.raise_for_status()
-            result = resp.json()
-            return result["content"][0]["text"]
+        
+        retries = 2
+        for attempt in range(retries + 1):
+            if self.delay > 0:
+                async with self.lock:
+                    await asyncio.sleep(self.delay)
+                    
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.post(self.url, headers=headers, json=data)
+                    resp.raise_for_status()
+                    result = resp.json()
+                    return result["content"][0]["text"]
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429 and attempt < retries:
+                    logger.warning(f"Claude 429 Too Many Requests. Retrying in 60s (Attempt {attempt+1}/{retries})")
+                    await asyncio.sleep(60)
+                    continue
+                raise
 
 
 class GeminiProvider:
     name = "gemini"
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, delay: float = 2.0):
         self.api_key = api_key
-        self.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={self.api_key}"
+        self.url = "https://generativelanguage.googleapis.com/v1beta/interactions"
+        self.delay = delay
+        self.lock = asyncio.Lock()
 
+    # pyrefly: ignore [bad-return]
     async def complete(self, system: str, user: str) -> str:
-        headers = {"Content-Type": "application/json"}
-        data = {
-            "systemInstruction": {"parts": [{"text": system}]},
-            "contents": [{"parts": [{"text": user}]}],
-            "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.api_key
         }
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(self.url, headers=headers, json=data)
-            resp.raise_for_status()
-            result = resp.json()
-            return result["candidates"][0]["content"]["parts"][0]["text"]
+        data = {
+            "model": "gemini-3.1-flash-lite",
+            "input": f"{system}\n\n{user}"
+        }
+        
+        retries = 2
+        for attempt in range(retries + 1):
+            if self.delay > 0:
+                async with self.lock:
+                    await asyncio.sleep(self.delay)
+                    
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.post(self.url, headers=headers, json=data)
+                    resp.raise_for_status()
+                    result = resp.json()
+                    
+                    logger.debug(f"Gemini raw response: {json.dumps(result, indent=2)}")
+                    
+                    # Parse Interactions API response
+                    steps = result.get("steps", [])
+                    for step in reversed(steps):
+                        if step.get("type") == "model_output":
+                            content = step.get("content", [])
+                            if content and content[0].get("type") == "text":
+                                return content[0]["text"]
+                                
+                    raise ValueError(f"Failed to parse text from Gemini response: {result}")
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429 and attempt < retries:
+                    logger.warning(f"Gemini 429 Too Many Requests. Retrying in 60s (Attempt {attempt+1}/{retries})")
+                    await asyncio.sleep(60)
+                    continue
+                raise
 
 
 class OllamaProvider:
     name = "ollama"
     
-    def __init__(self, host: str, model: str = "llama3"):
+    def __init__(self, host: str, model: str = "llama3", delay: float = 2.0):
         self.host = host.rstrip("/")
         self.url = f"{self.host}/api/chat"
         self.model = model
+        self.delay = delay
+        self.lock = asyncio.Lock()
 
+    # pyrefly: ignore [bad-return]
     async def complete(self, system: str, user: str) -> str:
         data = {
             "model": self.model,
@@ -280,14 +332,28 @@ class OllamaProvider:
             "stream": False,
             "options": {"temperature": 0.1},
         }
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(self.url, json=data)
-            resp.raise_for_status()
-            result = resp.json()
-            return result["message"]["content"]
+        
+        retries = 2
+        for attempt in range(retries + 1):
+            if self.delay > 0:
+                async with self.lock:
+                    await asyncio.sleep(self.delay)
+                    
+            try:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.post(self.url, json=data)
+                    resp.raise_for_status()
+                    result = resp.json()
+                    return result["message"]["content"]
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429 and attempt < retries:
+                    logger.warning(f"Ollama 429 Too Many Requests. Retrying in 60s (Attempt {attempt+1}/{retries})")
+                    await asyncio.sleep(60)
+                    continue
+                raise
 
 
-def get_provider(force_provider: str | None = None) -> LLMProvider | None:
+def get_provider(force_provider: str | None = None, delay: float = 2.0) -> LLMProvider | None:
     # First, load config file if exists
     config = {}
     config_path = Path.home() / ".neurodiff" / "config.json"
@@ -302,16 +368,16 @@ def get_provider(force_provider: str | None = None) -> LLMProvider | None:
 
     if force_provider == "claude" or (not force_provider and get_key("ANTHROPIC_API_KEY", "claude_key")):
         key = get_key("ANTHROPIC_API_KEY", "claude_key")
-        if key: return ClaudeProvider(key)
+        if key: return ClaudeProvider(key, delay=delay)
     
     if force_provider == "gemini" or (not force_provider and get_key("GOOGLE_API_KEY", "gemini_key")):
         key = get_key("GOOGLE_API_KEY", "gemini_key")
-        if key: return GeminiProvider(key)
+        if key: return GeminiProvider(key, delay=delay)
 
     if force_provider == "ollama" or (not force_provider and get_key("OLLAMA_HOST", "ollama_key")):
-        host = get_key("OLLAMA_HOST", "ollama_key") or "http://localhost:11434"
-        model = get_key("OLLAMA_MODEL", "ollama_model") or "llama3"
-        return OllamaProvider(host, model)
+        host = os.environ.get("OLLAMA_HOST") or config.get("ollama_host", "http://localhost:11434")
+        model = os.environ.get("OLLAMA_MODEL") or config.get("ollama_model", "llama3")
+        return OllamaProvider(host, model, delay=delay)
 
     return None
 

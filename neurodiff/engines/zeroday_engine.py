@@ -217,8 +217,8 @@ Analyze for logic vulnerabilities only.
         all_findings = []
         error = None
         
-        # Run concurrently with a semaphore of 8
-        semaphore = asyncio.Semaphore(8)
+        # Run concurrently with a semaphore of 3 (for free tier compatibility)
+        semaphore = asyncio.Semaphore(3)
         
         async def sem_analyze(c):
             async with semaphore:

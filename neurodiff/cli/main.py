@@ -259,6 +259,7 @@ def analyze(
     fail_on_mismatch: bool = typer.Option(False, "--fail-on-mismatch", help="Fail pipeline if intent vs reality verdict is mismatch or suspicious"),
     fail_on_critical_logic: bool = typer.Option(False, "--fail-on-critical-logic", help="Fail pipeline if any critical logic vulnerability is found"),
     llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Force specific LLM provider: gemini | claude | ollama"),
+    llm_delay: float = typer.Option(2.0, "--llm-delay", help="Seconds to delay between concurrent LLM calls"),
     llm_only: bool = typer.Option(False, "--llm-only", help="Skip static engines (assumes cached/mocked output if used in isolation, but standard run gathers data first)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show verbose output (e.g., token usage)"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Bypass LLM cache"),
@@ -438,7 +439,7 @@ def analyze(
         # Phase 4 — Logic Vulnerability (ZeroDay)
         zeroday_report = None
         if (use_llm or only == "zeroday") and not skip_zeroday:
-            provider = get_provider(llm_provider)
+            provider = get_provider(llm_provider, delay=llm_delay)
             if provider:
                 from neurodiff.engines.zeroday_engine import ZeroDayEngine
                 console.print(f"[cyan]Running Logic Vulnerability Analysis via {provider.name}…[/cyan]")
@@ -451,7 +452,7 @@ def analyze(
         # Phase 4 — Intent Verification
         intent_report = None
         if (use_llm or only == "intent") and not skip_intent:
-            provider = get_provider(llm_provider)
+            provider = get_provider(llm_provider, delay=llm_delay)
             if provider:
                 from neurodiff.engines.intent_engine import extract_intent, build_semantic_summary, run_intent_analysis
                 console.print(f"[cyan]Running Intent Verification via {provider.name}…[/cyan]")
@@ -465,7 +466,7 @@ def analyze(
         # Phase 4 — LLM Deep Analysis
         llm_report = None
         if use_llm and only != "intent":
-            provider = get_provider(llm_provider)
+            provider = get_provider(llm_provider, delay=llm_delay)
             if not provider:
                 console.print("[yellow]⚠ LLM Engine skipped: No valid provider configured (set ANTHROPIC_API_KEY, GOOGLE_API_KEY, or OLLAMA_HOST).[/yellow]")
             else:
@@ -848,7 +849,7 @@ def apply(
         
     import subprocess
     cmd = ["git", "apply", str(patch_file)]
-    result = subprocess.run(cmd, cwd=str(Path(repo_path).resolve()), capture_output=True, text=True)
+    result = subprocess.run(cmd, cwd=str(Path(repo_path).resolve()), capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode == 0:
         console.print(f"[green]✓ Applied correction for {finding_id}[/green]")
     else:

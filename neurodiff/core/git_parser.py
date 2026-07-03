@@ -57,6 +57,8 @@ class GitParser:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=True,
             )
             file_paths = result.stdout.strip().split("\n")
@@ -96,6 +98,8 @@ class GitParser:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=True,
             )
             raw_diff = result.stdout
@@ -107,6 +111,8 @@ class GitParser:
                     cwd=self.repo_path,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     check=True,
                 )
                 content_before = result_before.stdout
@@ -120,6 +126,8 @@ class GitParser:
                     cwd=self.repo_path,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     check=True,
                 )
                 content_after = result_after.stdout

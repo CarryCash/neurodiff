@@ -49,6 +49,7 @@ async def test_mock_llm_auth_gap():
             "confidence": 0.9
         }]
     })])
+    # pyrefly: ignore [bad-argument-type]
     engine = ZeroDayEngine(provider)
     
     # pyrefly: ignore [bad-argument-type]
@@ -78,6 +79,7 @@ async def test_confidence_filter():
             "confidence": 0.5  # Below 0.7 threshold
         }]
     })])
+    # pyrefly: ignore [bad-argument-type]
     engine = ZeroDayEngine(provider)
     
     # pyrefly: ignore [bad-argument-type]
@@ -92,6 +94,7 @@ async def test_confidence_filter():
 @pytest.mark.asyncio
 async def test_empty_findings():
     provider = MockProvider([json.dumps({"findings": []})])
+    # pyrefly: ignore [bad-argument-type]
     engine = ZeroDayEngine(provider)
     
     # pyrefly: ignore [bad-argument-type]

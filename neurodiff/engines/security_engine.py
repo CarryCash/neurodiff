@@ -46,6 +46,8 @@ class SecurityEngine:
                 ["semgrep", "--version"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
             )
             return result.returncode == 0
@@ -105,6 +107,8 @@ class SecurityEngine:
                 ["semgrep", "--json", "--config=auto", str(temp_path)],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=15,
             )
 

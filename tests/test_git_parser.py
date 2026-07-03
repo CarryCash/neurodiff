@@ -21,6 +21,8 @@ def temp_git_repo(tmp_path: Path) -> Path:
         ["git", "init"],
         cwd=repo_path,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
 
@@ -29,12 +31,16 @@ def temp_git_repo(tmp_path: Path) -> Path:
         ["git", "config", "user.email", "test@example.com"],
         cwd=repo_path,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test User"],
         cwd=repo_path,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
 
@@ -44,12 +50,16 @@ def temp_git_repo(tmp_path: Path) -> Path:
         ["git", "add", "."],
         cwd=repo_path,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
     subprocess.run(
         ["git", "commit", "-m", "Initial commit"],
         cwd=repo_path,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
 
@@ -107,12 +117,16 @@ def test_get_file_diffs_with_changes(temp_git_repo: Path) -> None:
         ["git", "add", "."],
         cwd=temp_git_repo,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
     subprocess.run(
         ["git", "commit", "-m", "Update test.py"],
         cwd=temp_git_repo,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
 
