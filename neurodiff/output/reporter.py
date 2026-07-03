@@ -47,6 +47,8 @@ class Reporter:
         arch_report: Any = None,
         llm_report: LLMReport | None = None,
         cognitive_report: Any | None = None,
+        intent_report: Any | None = None,
+        zeroday_report: Any | None = None,
         verbose: bool = False,
     ) -> None:
         """Generate and print a complete analysis report."""
@@ -62,6 +64,12 @@ class Reporter:
         
         if cognitive_report is not None:
             self._print_cognitive_report(cognitive_report)
+            
+        if intent_report is not None:
+            self._print_intent_report(intent_report)
+
+        if zeroday_report is not None:
+            self._print_zeroday_report(zeroday_report)
             
         self._print_risk_score(
             semantic_events, security_findings, duplication_findings,
@@ -413,6 +421,139 @@ class Reporter:
         v_map = {"safe": ("✅ SAFE", "green"), "caution": ("⚠ CAUTION", "yellow"), "danger": ("⛔ DANGER", "red bold")}
         v_str, v_col = v_map.get(report.overall_verdict, ("UNKNOWN", "white"))
         self.console.print(f"[bold]Overall Verdict:[/bold] [{v_col}]{v_str}[/{v_col}]\n")
+
+    # ------------------------------------------------------------------
+    # LLM Report
+    # ------------------------------------------------------------------
+    def _print_llm_report(self, report: LLMReport) -> None:
+        content = ""
+        if report.executive_summary:
+            es = report.executive_summary
+            v_col = {"critical": "red bold", "high": "red", "medium": "yellow", "low": "green"}.get(es.get("overall_risk", "low"), "white")
+            content += f"[bold]Risk:[/bold] [{v_col}]{es.get('overall_risk', 'UNKNOWN').upper()}[/{v_col}]  "
+            safe_str = "[bold green]✅ Safe to Merge[/bold green]" if es.get("safe_to_merge") else "[bold red]⛔ DO NOT MERGE[/bold red]"
+            content += f"{safe_str}\n\n"
+            content += f"[bold]Verdict:[/bold] {es.get('one_line_verdict', '')}\n\n"
+            
+            if es.get("key_concerns"):
+                content += "[bold]Key Concerns:[/bold]\n"
+                for c in es.get("key_concerns", []):
+                    content += f"  • {c}\n"
+                content += "\n"
+                
+            if es.get("merge_blockers"):
+                content += "[bold red]Blockers:[/bold red]\n"
+                for b in es.get("merge_blockers", []):
+                    content += f"  ⛔ {b}\n"
+                content += "\n"
+
+        if report.fix_plan:
+            fp = report.fix_plan
+            if fp.get("immediate_actions"):
+                content += "[bold]Action Plan:[/bold]\n"
+                for a in fp.get("immediate_actions", []):
+                    content += f"  {a.get('priority', 9)}. {a.get('action')} [dim]({a.get('file', '')})[/dim]\n"
+                content += "\n"
+                
+            if fp.get("suggested_split"):
+                content += f"[bold yellow]Split PR Suggested:[/bold yellow] {fp.get('split_rationale')}\n\n"
+
+        if not content.strip():
+            content = "No deep insights generated."
+
+        self.console.print(Panel(content.strip(), title="[bold]Deep Analysis & AI Review[/bold]", border_style="cyan"))
+        self.console.print()
+
+    # ------------------------------------------------------------------
+    # Intent Report
+    # ------------------------------------------------------------------
+    def _print_intent_report(self, report: Any) -> None:
+        self.console.print()
+        self.console.print("━━━ [bold magenta]🎯 Intent vs Reality[/bold magenta] ━━━━━━━━━━━━━━━━━━━━━━━")
+        self.console.print()
+        self.console.print(f"[bold]Commit:[/bold] \"{report.intent.commit_title}\"")
+        self.console.print()
+        
+        verdict_color = {
+            "match": "green",
+            "partial_match": "yellow",
+            "mismatch": "red",
+            "suspicious": "red"
+        }.get(report.verdict, "white")
+        
+        icon = "⛔" if report.verdict in ("mismatch", "suspicious") else ("⚠️" if report.verdict == "partial_match" else "✅")
+        
+        self.console.print(f"Alignment Score: {report.alignment_score}/100  {icon} [{verdict_color}]{report.verdict.upper()}[/{verdict_color}]")
+        self.console.print(f"Intent Keywords: {', '.join(report.intent_keywords)}")
+        self.console.print()
+        
+        self.console.print(f"✅ [bold green]Matched Changes ({len(report.matched_changes)}):[/bold green]")
+        for m in report.matched_changes:
+            self.console.print(f"  • {m.get('change')} (confidence: {m.get('confidence', 0.0)})")
+            
+        if report.unmatched_changes:
+            self.console.print()
+            self.console.print(f"❌ [bold red]Unmatched Changes ({len(report.unmatched_changes)}):[/bold red]")
+            for u in report.unmatched_changes:
+                sev = u.get("severity", "LOW").upper()
+                self.console.print(f"  • {sev}\t{u.get('change')} — {u.get('concern')}")
+                
+        if report.missing_changes:
+            self.console.print()
+            self.console.print(f"⚠️  [bold yellow]Missing Changes ({len(report.missing_changes)}):[/bold yellow]")
+            for miss in report.missing_changes:
+                self.console.print(f"  • Expected {miss.get('expected')} — {miss.get('reason')}")
+                
+        self.console.print()
+        self.console.print(f"[bold]Verdict:[/bold] \"{report.verdict_explanation}\"")
+        self.console.print()
+        self.console.print(f"[bold]Recommendation:[/bold] {report.recommendation.upper()}")
+        self.console.print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        self.console.print()
+
+    # ------------------------------------------------------------------
+    # Zero-Day Report
+    # ------------------------------------------------------------------
+    def _print_zeroday_report(self, report: Any) -> None:
+        self.console.print()
+        self.console.print("━━━ [bold red]🕵️ Logic Vulnerability Analysis[/bold red] ━━━━━━━━━━━━━━")
+        self.console.print()
+        self.console.print(f"Functions analyzed: {report.functions_analyzed}  │  Skipped (low risk): {report.functions_skipped}  │  Provider: {report.provider_used}")
+        self.console.print()
+        
+        if not report.findings:
+            self.console.print("  [green]✓ No logic vulnerabilities detected[/green]")
+            self.console.print()
+            return
+            
+        for f in report.findings:
+            if f.severity == "critical":
+                icon = "🔴"
+                sev_color = "red bold"
+            elif f.severity == "high":
+                icon = "🟠"
+                sev_color = "red"
+            else:
+                icon = "🟡"
+                sev_color = "yellow"
+                
+            type_formatted = f.type.replace("_", " ").title()
+            
+            self.console.print(f"{icon} [{sev_color}]{f.severity.upper()}[/{sev_color}] — {type_formatted}")
+            self.console.print(f"  [bold]{f.function_name}()[/bold] │ {f.file_path} │ layer: {f.layer}")
+            self.console.print()
+            self.console.print(f"  [bold]What:[/bold] {f.description}")
+            self.console.print()
+            self.console.print(f"  [bold]Attack vector:[/bold] {f.attack_vector}")
+            self.console.print()
+            self.console.print(f"  [bold]Missing:[/bold] {f.missing_element}")
+            self.console.print()
+            self.console.print(f"  [bold]Fix:[/bold] {f.suggested_fix}")
+            self.console.print(f"  [dim]Confidence: {int(f.confidence * 100)}%[/dim]")
+            self.console.print()
+            
+        self.console.print(f"Functions skipped (not auth/api/mutation related): {report.functions_skipped}")
+        self.console.print()
 
     # ------------------------------------------------------------------
     # Risk Score

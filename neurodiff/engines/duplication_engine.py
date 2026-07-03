@@ -80,6 +80,14 @@ class DuplicationEngine:
         count = 0
         repo_path = repo_path.resolve()
 
+        py_files = [
+            f for f in repo_path.rglob("*")
+            if not f.is_dir() and f.suffix.lower() == ".py" and not any(part in self.EXCLUDED_DIRS for part in f.parts)
+        ]
+        print(f"Found {len(py_files)} .py files before embedding")
+
+        first_file_parsed = False
+
         for file_path in repo_path.rglob("*"):
             if file_path.is_dir():
                 continue
@@ -93,6 +101,10 @@ class DuplicationEngine:
                 continue
 
             try:
+                if not first_file_parsed:
+                    print(f"First file path it tries to parse: {file_path}")
+                    first_file_parsed = True
+
                 content = file_path.read_text(encoding="utf-8")
                 tree = ast_engine._parse_code(content, lang)
                 functions = ast_engine._extract_functions(tree, lang)
@@ -123,7 +135,8 @@ class DuplicationEngine:
                         ],
                     )
                     count += 1
-            except Exception:
+            except Exception as e:
+                print(f"Exception parsing {file_path}: {e}")
                 # Ignore unreadable files or parsing errors
                 pass
 

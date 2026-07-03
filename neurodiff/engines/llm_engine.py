@@ -28,6 +28,8 @@ class LLMContext:
     repo_stats: dict[str, Any]
     diff_metadata: dict[str, Any]
     cognitive_report: dict[str, Any] | None = None
+    intent_report: dict[str, Any] | None = None
+    zeroday_report: dict[str, Any] | None = None
     truncated: bool = False
 
 @dataclass
@@ -57,6 +59,8 @@ class ContextBuilder:
         repo_stats: dict,
         diff_metadata: dict,
         cognitive_report: Any | None = None,
+        intent_report: Any | None = None,
+        zeroday_report: Any | None = None,
     ) -> LLMContext:
         """Build and optionally truncate the context payload."""
         from neurodiff.core.semantic_events import FunctionAdded, FunctionModified, ClassAdded, ClassModified, ImportAdded
@@ -106,6 +110,18 @@ class ContextBuilder:
             except Exception:
                 pass
 
+        # Serialize intent report
+        serialized_intent = None
+        if intent_report:
+            from dataclasses import asdict
+            serialized_intent = asdict(intent_report)
+
+        # Serialize zeroday report
+        serialized_zeroday = None
+        if zeroday_report:
+            from dataclasses import asdict
+            serialized_zeroday = asdict(zeroday_report)
+
         ctx = LLMContext(
             semantic_events=serialized_events,
             security_findings=serialized_sec,
@@ -114,6 +130,8 @@ class ContextBuilder:
             repo_stats=repo_stats,
             diff_metadata=diff_metadata,
             cognitive_report=serialized_cog,
+            intent_report=serialized_intent,
+            zeroday_report=serialized_zeroday,
         )
 
         return cls._truncate_if_needed(ctx)

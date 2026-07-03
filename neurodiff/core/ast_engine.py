@@ -114,12 +114,11 @@ class ASTEngine:
             return EmptyTree()
 
         try:
-            lang_module = getattr(self.tree_sitter_languages, language)
-            parser = self.tree_sitter.Parser()
-            parser.set_language(lang_module.language)
+            parser = self.tree_sitter_languages.get_parser(language)
             tree = parser.parse(code.encode())
             return tree
-        except Exception:
+        except Exception as e:
+            print(f"Exception in _parse_code: {e}")
             return type("EmptyTree", (), {"root_node": None})()
 
     def _extract_functions(
@@ -133,7 +132,8 @@ class ASTEngine:
 
         try:
             self._traverse_functions(tree.root_node, functions, language)
-        except Exception:
+        except Exception as e:
+            print(f"Exception in _extract_functions: {e}")
             pass
 
         return functions
@@ -151,7 +151,9 @@ class ASTEngine:
                 if func_name:
                     calls = self._extract_calls(node, language)
                     functions[func_name] = {
+                        # pyrefly: ignore [missing-attribute]
                         "start_line": node.start_point[0],
+                        # pyrefly: ignore [missing-attribute]
                         "end_line": node.end_point[0],
                         "calls": calls,
                         "node": node,
@@ -165,7 +167,9 @@ class ASTEngine:
                 if func_name:
                     calls = self._extract_calls(node, language)
                     functions[func_name] = {
+                        # pyrefly: ignore [missing-attribute]
                         "start_line": node.start_point[0],
+                        # pyrefly: ignore [missing-attribute]
                         "end_line": node.end_point[0],
                         "calls": calls,
                         "node": node,
@@ -182,7 +186,9 @@ class ASTEngine:
                 if func_name:
                     calls = self._extract_calls(node, language)
                     functions[func_name] = {
+                        # pyrefly: ignore [missing-attribute]
                         "start_line": node.start_point[0],
+                        # pyrefly: ignore [missing-attribute]
                         "end_line": node.end_point[0],
                         "calls": calls,
                         "node": node,
@@ -285,7 +291,9 @@ class ASTEngine:
                 methods = self._extract_class_methods(node, language)
                 inherits_from = self._extract_class_inheritance(node, language)
                 classes[class_name] = {
+                    # pyrefly: ignore [missing-attribute]
                     "start_line": node.start_point[0],
+                    # pyrefly: ignore [missing-attribute]
                     "end_line": node.end_point[0],
                     "methods": methods,
                     "inherits_from": inherits_from,
@@ -318,6 +326,7 @@ class ASTEngine:
                 # JS/TS classes use method_definition
                 method_type = "method_definition"
 
+            # pyrefly: ignore [missing-attribute]
             body_node = node.child_by_field_name("body")
             if body_node and hasattr(body_node, "children"):
                 for child in body_node.children:
@@ -334,6 +343,7 @@ class ASTEngine:
         inherits: list[str] = []
         try:
             if language == "python":
+                # pyrefly: ignore [missing-attribute]
                 superclasses_node = node.child_by_field_name("superclasses")
                 if superclasses_node and hasattr(superclasses_node, "children"):
                     for child in superclasses_node.children:
@@ -386,6 +396,7 @@ class ASTEngine:
                 if module:
                     symbols = self._extract_import_symbols(node, language)
                     imports[module] = {
+                        # pyrefly: ignore [missing-attribute]
                         "line": node.start_point[0],
                         "symbols": symbols,
                     }
@@ -401,7 +412,9 @@ class ASTEngine:
             if hasattr(node, "text"):
                 statement = node.text.decode()
                 if language == "python":
+                    # pyrefly: ignore [missing-attribute]
                     if node.type == "import_from_statement":
+                        # pyrefly: ignore [missing-attribute]
                         module_name_node = node.child_by_field_name("module_name")
                         if module_name_node:
                             return module_name_node.text.decode()
@@ -611,7 +624,7 @@ class ASTEngine:
         self, content: str, start_line: int, end_line: int
     ) -> str:
         """Extract function body from source code."""
-        lines = content.split("\\n")
+        lines = content.splitlines()
         start = max(0, start_line)
         end = min(len(lines), end_line + 1)
-        return "\\n".join(lines[start:end])
+        return "\n".join(lines[start:end])

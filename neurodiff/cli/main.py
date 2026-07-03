@@ -27,7 +27,7 @@ console = Console()
 # Common types
 _FormatType = Literal["terminal", "json", "html", "sarif", "all"]
 _LangType = Literal["python", "javascript", "typescript", "auto"]
-_OnlyType = Literal["semantic", "security", "duplication", "arch", "cognitive", "all"]
+_OnlyType = Literal["semantic", "security", "duplication", "arch", "cognitive", "intent", "zeroday", "all"]
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +63,7 @@ def index(
 
         console.print("[yellow]Extracting and embedding functions…[/yellow]")
         count = dup_engine.index_repo(repo_path_obj, ast_engine)
-        console.print(f"[green]✓ Indexed [bold]{count}[/bold] functions.[/green]")
+        console.print(f"[green]Indexed [bold]{count}[/bold] functions successfully.[/green]")
         console.print(f"[dim]Database: {dup_engine.CHROMA_DB_PATH}[/dim]")
 
     except NeuroDiffError as e:
@@ -253,9 +253,11 @@ def analyze(
     only: Optional[_OnlyType] = typer.Option(
         None,
         "--only",
-        help="Run only specific engine: semantic | security | duplication | arch | cognitive | all",
+        help="Run only specific engine: semantic | security | duplication | arch | cognitive | intent | zeroday | all",
     ),
     use_llm: bool = typer.Option(False, "--llm", help="Run Phase 4 LLM deep analysis"),
+    fail_on_mismatch: bool = typer.Option(False, "--fail-on-mismatch", help="Fail pipeline if intent vs reality verdict is mismatch or suspicious"),
+    fail_on_critical_logic: bool = typer.Option(False, "--fail-on-critical-logic", help="Fail pipeline if any critical logic vulnerability is found"),
     llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Force specific LLM provider: gemini | claude | ollama"),
     llm_only: bool = typer.Option(False, "--llm-only", help="Skip static engines (assumes cached/mocked output if used in isolation, but standard run gathers data first)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show verbose output (e.g., token usage)"),
@@ -318,7 +320,11 @@ def analyze(
         skip_architecture = only not in ("arch",)
         skip_arch_engine = only not in ("arch", "cognitive")
         skip_cognitive = only != "cognitive"
-        # "semantic" keeps AST only
+        skip_intent = only != "intent"
+        skip_zeroday = only != "zeroday"
+    else:
+        skip_intent = False
+        skip_zeroday = False
 
     try:
         repo_path_obj = Path(repo_path).resolve()
@@ -429,9 +435,36 @@ def analyze(
             except Exception as exc:
                 console.print(f"[yellow]⚠ Cognitive engine failed: {exc}[/yellow]")
 
+        # Phase 4 — Logic Vulnerability (ZeroDay)
+        zeroday_report = None
+        if (use_llm or only == "zeroday") and not skip_zeroday:
+            provider = get_provider(llm_provider)
+            if provider:
+                from neurodiff.engines.zeroday_engine import ZeroDayEngine
+                console.print(f"[cyan]Running Logic Vulnerability Analysis via {provider.name}…[/cyan]")
+                zd_engine = ZeroDayEngine(provider)
+                try:
+                    zeroday_report = asyncio.run(zd_engine.run(all_events, file_diffs, all_security, arch_report))
+                except Exception as exc:
+                    console.print(f"[red]Zero-Day Engine Error: {exc}[/red]")
+
+        # Phase 4 — Intent Verification
+        intent_report = None
+        if (use_llm or only == "intent") and not skip_intent:
+            provider = get_provider(llm_provider)
+            if provider:
+                from neurodiff.engines.intent_engine import extract_intent, build_semantic_summary, run_intent_analysis
+                console.print(f"[cyan]Running Intent Verification via {provider.name}…[/cyan]")
+                intent_obj = extract_intent(repo_path_obj, head_ref)
+                semantic_summary = build_semantic_summary(all_events)
+                try:
+                    intent_report = asyncio.run(run_intent_analysis(intent_obj, semantic_summary, provider))
+                except Exception as exc:
+                    console.print(f"[red]Intent Engine Error: {exc}[/red]")
+
         # Phase 4 — LLM Deep Analysis
         llm_report = None
-        if use_llm:
+        if use_llm and only != "intent":
             provider = get_provider(llm_provider)
             if not provider:
                 console.print("[yellow]⚠ LLM Engine skipped: No valid provider configured (set ANTHROPIC_API_KEY, GOOGLE_API_KEY, or OLLAMA_HOST).[/yellow]")
@@ -455,6 +488,8 @@ def analyze(
                     repo_stats=repo_stats,
                     diff_metadata=diff_metadata,
                     cognitive_report=cognitive_report,
+                    intent_report=intent_report,
+                    zeroday_report=zeroday_report,
                 )
                 if verbose and llm_context.truncated:
                     console.print("[yellow]⚠ LLM context was truncated to fit the token limit.[/yellow]")
@@ -535,8 +570,18 @@ def analyze(
                 arch_report=arch_report,
                 llm_report=llm_report,
                 cognitive_report=cognitive_report,
+                intent_report=intent_report,
+                zeroday_report=zeroday_report,
                 verbose=verbose,
             )
+
+        if fail_on_mismatch and intent_report and intent_report.verdict in ("mismatch", "suspicious"):
+            console.print(f"[bold red]Pipeline failed: Intent verification returned {intent_report.verdict}[/bold red]")
+            raise typer.Exit(1)
+            
+        if fail_on_critical_logic and zeroday_report and zeroday_report.critical_count > 0:
+            console.print(f"[bold red]Pipeline failed: Found {zeroday_report.critical_count} critical logic vulnerabilities[/bold red]")
+            raise typer.Exit(1)
 
         # Phase 5 — SARIF output
         if sarif_output or format_type == "all":
@@ -564,6 +609,8 @@ def analyze(
                 arch=arch_report,
                 cognitive=cognitive_report,
                 llm=llm_report,
+                intent_report=intent_report,
+                zeroday_report=zeroday_report,
                 global_context=global_context,
                 corrections=code_corrections
             )
@@ -602,6 +649,8 @@ def analyze(
                     arch=arch_report,
                     cognitive=cognitive_report,
                     llm=llm_report,
+                    intent_report=intent_report,
+                    zeroday_report=zeroday_report,
                     global_context=global_context,
                     corrections=code_corrections
                 )

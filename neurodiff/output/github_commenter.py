@@ -107,6 +107,23 @@ def render_github_markdown(report: FullReport) -> str:
             lines.append(f"- [ ] Review {len(report.corrections)} active corrections generated")
         lines.append("\n</details>")
         
+    if hasattr(report, "zeroday_report") and report.zeroday_report and report.zeroday_report.findings:
+        zd = report.zeroday_report
+        lines.append("\n### 🕵️ Logic Vulnerability Analysis\n")
+        lines.append(f"> ⚠️ **{len(zd.findings)} logic vulnerabilities detected** ({zd.critical_count} critical) — requires review before merge\n")
+        lines.append("| Severity | Function | File | Type | Confidence |")
+        lines.append("|----------|----------|------|------|------------|")
+        for f in zd.findings:
+            sev_icon = "🔴 Critical" if f.severity == "critical" else "🟠 High" if f.severity == "high" else "🟡 Medium"
+            lines.append(f"| {sev_icon} | `{f.function_name}()` | `{f.file_path}` | {f.type.replace('_', ' ').title()} | {int(f.confidence*100)}% |")
+        
+        lines.append("")
+        for f in zd.findings:
+            if f.severity in ("critical", "high"):
+                lines.append(f"**{f.severity.capitalize()}: {f.type.replace('_', ' ').title()} in `{f.function_name}()`**")
+                lines.append(f"{f.description}")
+                lines.append(f"**Fix:** {f.suggested_fix}\n")
+
     lines.append("\n---\n")
     lines.append(f"<sub>🤖 NeuroDiff v{VERSION} | Engines: ast, security, duplication, arch, cognitive, context, llm, corrections</sub>")
     

@@ -22,7 +22,10 @@ class FullReport:
     arch: Any
     cognitive: Any
     llm: Any | None
-    global_context: GlobalContext | None
+    intent_report: Any | None = None
+    zeroday_report: Any | None = None
+    global_context: GlobalContext | None = None
+    # pyrefly: ignore [assignment, bad-class-definition]
     corrections: list[CodeCorrection]
 
 
@@ -268,6 +271,30 @@ def generate_html(report: FullReport) -> str:
             </div>
             """
 
+    # Zero Day (Logic Vulnerabilities) HTML
+    zeroday_html = ""
+    if hasattr(report, "zeroday_report") and report.zeroday_report and report.zeroday_report.findings:
+        zd = report.zeroday_report
+        zeroday_html = f"<h2>🕵️ Logic Vulnerabilities ({len(zd.findings)} found, {zd.critical_count} critical)</h2>"
+        for f in zd.findings:
+            if f.severity == "critical":
+                icon, color = "🔴", "var(--red)"
+            elif f.severity == "high":
+                icon, color = "🟠", "var(--orange)"
+            else:
+                icon, color = "🟡", "var(--yellow)"
+                
+            zeroday_html += f"""
+            <div class="card" style="margin-bottom: 1rem;">
+                <h3 style="margin-top:0; color:{color};">{icon} {f.severity.upper()} — {f.type.replace('_', ' ').title()} <span style="float:right; font-size:0.9rem; color:var(--text-dim);">confidence {int(f.confidence*100)}%</span></h3>
+                <div style="font-family: var(--font-mono); margin-bottom: 0.5rem;">{f.function_name}() &middot; {f.file_path}</div>
+                <div style="color:var(--text-dim); margin-bottom: 1rem;">{f.description}</div>
+                <div style="margin-bottom: 0.5rem;"><strong>Attack vector:</strong> {f.attack_vector}</div>
+                <div style="margin-bottom: 0.5rem;"><strong>Missing:</strong> {f.missing_element}</div>
+                <div style="margin-bottom: 1rem;"><strong>Fix:</strong> {f.suggested_fix}</div>
+            </div>
+            """
+
     # Global Context HTML
     context_html = ""
     if report.global_context:
@@ -353,6 +380,8 @@ def generate_html(report: FullReport) -> str:
         </div>
         
         {context_html}
+        
+        {zeroday_html}
         
         <!-- Add more sections here for detailed tables of security, arch, etc. as needed -->
         
