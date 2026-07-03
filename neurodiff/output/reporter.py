@@ -49,6 +49,8 @@ class Reporter:
         cognitive_report: Any | None = None,
         intent_report: Any | None = None,
         zeroday_report: Any | None = None,
+        shadow_report: Any | None = None,
+        perf_report: Any | None = None,
         verbose: bool = False,
     ) -> None:
         """Generate and print a complete analysis report."""
@@ -70,7 +72,14 @@ class Reporter:
 
         if zeroday_report is not None:
             self._print_zeroday_report(zeroday_report)
-            
+
+        if shadow_report is not None:
+            self._print_shadow_report(shadow_report)
+
+        if perf_report is not None:
+            # pyrefly: ignore [missing-attribute]
+            self._print_perf_report(perf_report)
+
         self._print_risk_score(
             semantic_events, security_findings, duplication_findings,
             architecture_findings or [], arch_report
@@ -692,3 +701,110 @@ class Reporter:
         )):
             return event.file  # type: ignore[union-attr]
         return "unknown"
+
+    # ------------------------------------------------------------------
+    # Shadow Developer Report
+    # ------------------------------------------------------------------
+    def _print_shadow_report(self, report: Any) -> None:
+        """Print Shadow Developer results."""
+        self.console.print(
+            f"\n[bold magenta]━━━  Shadow Developer ━━━━━━━━━━━━━━━━━━[/bold magenta]\n"
+        )
+
+        self.console.print(f"[bold]Mode:[/bold] {report.mode.upper()}")
+
+        if report.error:
+            self.console.print(f"[red]Error: {report.error}[/red]")
+            return
+
+        if report.files_generated:
+            self.console.print("\n[bold]Generated:[/bold]")
+            for f in report.files_generated:
+                self.console.print(f"  ✅ {f}")
+
+        if report.files_updated:
+            self.console.print("\n[bold]Updated:[/bold]")
+            for f in report.files_updated:
+                self.console.print(f"  ✅ {f}")
+
+        if report.docstrings_added:
+            self.console.print(f"\n[bold]Docstrings added:[/bold] {report.docstrings_added}")
+        if report.docstrings_updated:
+            self.console.print(f"[bold]Docstrings updated:[/bold] {report.docstrings_updated}")
+        if report.functions_still_undocumented:
+            self.console.print(
+                f"[yellow]⚠️  Functions still undocumented:[/yellow] {report.functions_still_undocumented}"
+            )
+
+        self.console.print(
+            f"\n[bold]Coverage:[/bold] {report.coverage_before:.1f}% → {report.coverage_after:.1f}%"
+        )
+        self.console.print()
+
+    # ------------------------------------------------------------------
+    # Algorithm Performance Report
+    # ------------------------------------------------------------------
+    def _print_perf_report(self, report: Any) -> None:
+        """Print Algorithm Performance Reviewer results."""
+        self.console.print(
+            f"\n[bold magenta]━━━  Algorithm Performance Reviewer ━━━━━━━━━━━━[/bold magenta]\n"
+        )
+
+        if report.error:
+            self.console.print(f"[red]Error: {report.error}[/red]")
+            return
+
+        if not report.findings:
+            self.console.print("[green]✓ No algorithmic performance issues found.[/green]")
+            return
+
+        self.console.print(
+            f"Found {len(report.findings)} performance issues in {report.functions_analyzed} analyzed functions."
+        )
+
+        from rich.table import Table
+        t = Table(show_lines=True)
+        t.add_column("Severity", style="bold", width=10)
+        t.add_column("Pattern", width=25)
+        t.add_column("Function", width=20)
+        t.add_column("Before → After", width=20)
+
+        severity_colors = {"critical": "red", "high": "yellow", "medium": "cyan", "low": "dim"}
+        
+        # Sort by severity
+        sorted_findings = sorted(
+            report.findings,
+            key=lambda x: {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(x.severity, 4)
+        )
+
+        for f in sorted_findings:
+            col = severity_colors.get(f.severity, "white")
+            t.add_row(
+                f"[{col}]{f.severity.upper()}[/{col}]",
+                f.pattern_type,
+                f.function_name,
+                f"{f.complexity_before} → {f.complexity_after}",
+            )
+        
+        self.console.print(t)
+
+        if report.rewrites:
+            from rich.syntax import Syntax
+            from rich.panel import Panel
+            self.console.print("\n[bold]LLM Optimized Rewrites (Diff View):[/bold]")
+            for rw in report.rewrites:
+                header = f"[cyan]• {rw.finding.function_name}[/cyan] — speedup: {rw.estimated_speedup} | {rw.finding.complexity_before} → {rw.finding.complexity_after}"
+                self.console.print(header)
+                
+                # Print the unified diff patch with syntax highlighting
+                if rw.patch:
+                    syntax = Syntax(rw.patch, "diff", theme="monokai", background_color="default", word_wrap=True)
+                    self.console.print(Panel(syntax, title="Proposed Changes", border_style="dim"))
+                
+                self.console.print(f"  [dim]Why slow:[/dim] {rw.why_slow}")
+                self.console.print(f"  [dim]Why fast:[/dim] {rw.why_fast}")
+                self.console.print()
+        if report.benchmark_file:
+            self.console.print(f"\n[green]✓ Benchmark written to {report.benchmark_file}[/green]")
+        
+        self.console.print()

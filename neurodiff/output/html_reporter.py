@@ -24,6 +24,7 @@ class FullReport:
     llm: Any | None
     intent_report: Any | None = None
     zeroday_report: Any | None = None
+    shadow_report: Any | None = None
     global_context: GlobalContext | None = None
     # pyrefly: ignore [assignment, bad-class-definition]
     corrections: list[CodeCorrection]
@@ -293,6 +294,50 @@ def generate_html(report: FullReport) -> str:
                 <div style="margin-bottom: 0.5rem;"><strong>Missing:</strong> {f.missing_element}</div>
                 <div style="margin-bottom: 1rem;"><strong>Fix:</strong> {f.suggested_fix}</div>
             </div>
+            </div>
+            """
+
+    # Performance Reviewer (Feature 4) HTML
+    perf_html = ""
+    if hasattr(report, "perf_report") and report.perf_report and report.perf_report.findings:
+        pr = report.perf_report
+        perf_html = f"<h2>⚡ Algorithm Performance Reviewer ({len(pr.findings)} issues found)</h2>"
+        for rw in pr.rewrites:
+            fnd = rw.finding
+            
+            orig_lines = ""
+            for ln in fnd.full_function_source.splitlines():
+                orig_lines += f"<span class='line-removed'>- {ln}</span>\n"
+            
+            corr_lines = ""
+            for ln in rw.rewritten_function.splitlines():
+                corr_lines += f"<span class='line-added'>+ {ln}</span>\n"
+                
+            perf_html += f"""
+            <div class="card" style="margin-bottom: 1rem;">
+                <h3 style="margin-top:0; color:var(--orange);">⚡ {fnd.complexity_before} → {fnd.complexity_after}</h3>
+                <div style="font-family: var(--font-mono); margin-bottom: 0.5rem;">{fnd.function_name}() &middot; {fnd.file}</div>
+                <div style="color:var(--text-dim); margin-bottom: 1rem;">Pattern: <strong>{fnd.pattern_type}</strong> — {fnd.description}</div>
+                
+                <div class="diff-container">
+                    <div class="diff-pane">
+                        <h4>ORIGINAL (SLOW)</h4>
+                        <pre>{orig_lines}</pre>
+                    </div>
+                    <div class="diff-pane">
+                        <h4>OPTIMIZED REWRITE</h4>
+                        <pre>{corr_lines}</pre>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 1rem; background: var(--bg); padding: 1rem; border-radius: 4px;">
+                    <div>💡 <strong>Why it was slow:</strong> {rw.why_slow}</div>
+                    <div style="margin-top: 0.5rem;">🚀 <strong>Why this is fast:</strong> {rw.why_fast}</div>
+                    <div style="margin-top: 0.5rem;">📐 <strong>Big O Proof:</strong> {rw.big_o_proof}</div>
+                    <div style="margin-top: 0.5rem;">⏱️ <strong>Estimated Speedup:</strong> <span style="color:var(--green)">{rw.estimated_speedup}</span></div>
+                    <div style="margin-top: 0.5rem;">🛡️ <strong>Equivalence:</strong> {rw.semantic_equivalence}</div>
+                </div>
+            </div>
             """
 
     # Global Context HTML
@@ -382,6 +427,8 @@ def generate_html(report: FullReport) -> str:
         {context_html}
         
         {zeroday_html}
+        
+        {perf_html}
         
         <!-- Add more sections here for detailed tables of security, arch, etc. as needed -->
         

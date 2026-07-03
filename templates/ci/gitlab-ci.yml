@@ -1,0 +1,12 @@
+neurodiff:
+  image: python:3.11
+  stage: review
+  script:
+    - pip install neurodiff
+    - neurodiff index .
+    - neurodiff analyze $CI_MERGE_REQUEST_DIFF_BASE_SHA $CI_COMMIT_SHA --llm --inline-comments --fail-on-mismatch --fail-on-critical-logic
+  variables:
+    GOOGLE_API_KEY: $GOOGLE_API_KEY
+    GITLAB_TOKEN: $GITLAB_TOKEN
+  only:
+    - merge_requests

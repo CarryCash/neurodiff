@@ -1,0 +1,13 @@
+pipelines:
+  pull-requests:
+    '**':
+      - step:
+          name: NeuroDiff Review
+          image: python:3.11
+          script:
+            - pip install neurodiff
+            - neurodiff index .
+            - neurodiff analyze origin/main HEAD --llm --inline-comments
+          environment:
+            GOOGLE_API_KEY: $GOOGLE_API_KEY
+            BITBUCKET_TOKEN: $BITBUCKET_TOKEN

@@ -1,0 +1,22 @@
+name: NeuroDiff Bot
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  respond:
+    if: contains(github.event.comment.body, '@neurodiff')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install NeuroDiff
+        run: pip install neurodiff
+      - name: Handle NeuroDiff command
+        run: neurodiff bot respond
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          NEURODIFF_PAYLOAD: ${{ toJson(github.event) }}

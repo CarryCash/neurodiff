@@ -281,6 +281,16 @@ def analyze(
     corrections: bool = typer.Option(False, "--corrections", help="Generate active code corrections via LLM"),
     auto_fix: bool = typer.Option(False, "--auto-fix", help="Auto-apply HIGH confidence corrections"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show auto-fix changes without writing"),
+    shadow: bool = typer.Option(False, "--shadow", help="Run Shadow Developer to generate/update docs"),
+    # Feature 4 — Algorithm Performance Reviewer
+    perf: bool = typer.Option(False, "--perf", help="Run Algorithm Performance Reviewer (AST + LLM)"),
+    perf_limit: int = typer.Option(5, "--perf-limit", help="Maximum number of rewrites to generate (defaults to top 5)"),
+    fail_on_slow: bool = typer.Option(False, "--fail-on-slow", help="Fail pipeline if O(n²) or worse pattern detected"),
+    perf_write_benchmarks: bool = typer.Option(False, "--perf-write-benchmarks", help="Write perf_benchmark.py with runnable speedup proofs"),
+    # Feature 5 — Collaborative PR Review Engine
+    inline_comments: bool = typer.Option(False, "--inline-comments", help="Post inline PR comments"),
+    platform: Optional[str] = typer.Option(None, "--platform", help="github | gitlab | bitbucket"),
+    max_comments: int = typer.Option(10, "--max-comments", help="Max inline comments to post"),
 ) -> None:
     """Analyze semantic differences between two Git references.
 
@@ -552,6 +562,56 @@ def analyze(
                             else:
                                 console.print(f"[red]✗ Failed to apply patch for {corr.finding_id}[/red]")
 
+        # Shadow Developer
+        shadow_report = None
+        if shadow and use_llm:
+            provider = get_provider(llm_provider, delay=llm_delay)
+            if provider:
+                from neurodiff.engines.shadow_engine import ShadowEngine
+                console.print("[cyan]Running Shadow Developer…[/cyan]")
+                shadow_eng = ShadowEngine(provider=provider)
+                shadow_inv = shadow_eng.scan_repo(repo_path_obj)
+                shadow_eng.print_preview(repo_path_obj, shadow_inv, no_inline=False)
+                try:
+                    if shadow_inv.mode == "generate":
+                        shadow_report = asyncio.run(shadow_eng.run_generate(
+                            repo_path_obj, shadow_inv, dry_run=dry_run, arch_report=arch_report,
+                        ))
+                    else:
+                        shadow_report = asyncio.run(shadow_eng.run_update(
+                            repo_path_obj, shadow_inv, all_events, dry_run=dry_run,
+                        ))
+                except Exception as exc:
+                    console.print(f"[red]Shadow Developer Error: {exc}[/red]")
+
+        # Feature 4 — Algorithm Performance Reviewer
+        perf_report = None
+        if perf:
+            from neurodiff.engines.perf_engine import PerfEngine
+            perf_provider = get_provider(llm_provider, delay=llm_delay) if use_llm else None
+            console.print("[cyan]Running Algorithm Performance Reviewer…[/cyan]")
+            perf_eng = PerfEngine(provider=perf_provider)
+            try:
+                perf_report = asyncio.run(perf_eng.run(
+                    all_events,
+                    file_diffs,
+                    write_benchmarks=perf_write_benchmarks,
+                    repo_path=repo_path_obj,
+                    rewrite_limit=perf_limit,
+                ))
+                if perf_report.findings:
+                    console.print(
+                        f"  [{'red' if perf_report.critical_count else 'yellow'}]"
+                        f"Found {len(perf_report.findings)} performance issues "
+                        f"({perf_report.critical_count} critical, {perf_report.high_count} high)[/{'red' if perf_report.critical_count else 'yellow'}]"
+                    )
+                else:
+                    console.print("  [green]✓ No algorithmic performance issues found.[/green]")
+                if perf_report.benchmark_file:
+                    console.print(f"  [green]✓ Benchmark written to {perf_report.benchmark_file}[/green]")
+            except Exception as exc:
+                console.print(f"[red]Performance Reviewer Error: {exc}[/red]")
+
         console.print()
 
         if format_type == "json":
@@ -573,6 +633,9 @@ def analyze(
                 cognitive_report=cognitive_report,
                 intent_report=intent_report,
                 zeroday_report=zeroday_report,
+                shadow_report=shadow_report,
+                # pyrefly: ignore [unexpected-keyword]
+                perf_report=perf_report,
                 verbose=verbose,
             )
 
@@ -582,6 +645,50 @@ def analyze(
             
         if fail_on_critical_logic and zeroday_report and zeroday_report.critical_count > 0:
             console.print(f"[bold red]Pipeline failed: Found {zeroday_report.critical_count} critical logic vulnerabilities[/bold red]")
+            raise typer.Exit(1)
+
+        if inline_comments:
+            from neurodiff.integrations.inline_commenter import (
+                map_findings_to_comments, detect_platform,
+                post_github_review, post_gitlab_review, post_bitbucket_review
+            )
+            comments = map_findings_to_comments(all_security, zeroday_report, perf_report)
+            if len(comments) > max_comments:
+                console.print(f"[dim]Truncating comments from {len(comments)} to {max_comments}[/dim]")
+                comments = comments[:max_comments]
+            
+            p = platform or detect_platform()
+            if p == "github":
+                # Need repo and PR number for GitHub (mocked or from env)
+                repo = os.environ.get("GITHUB_REPOSITORY", "user/repo")
+                pr_number_str = os.environ.get("GITHUB_REF", "").split("/")
+                pr_number = int(pr_number_str[2]) if len(pr_number_str) > 2 and pr_number_str[1] == "pull" else 1
+                token = os.environ.get("GITHUB_TOKEN", "")
+                
+                overall_risk = "CRITICAL" if (all_security and any(s.severity == "critical" for s in all_security)) or (zeroday_report and zeroday_report.critical_count > 0) else "COMMENT"
+                asyncio.run(post_github_review(
+                    comments, repo, pr_number, token, 
+                    overall_risk,
+                    file_diffs
+                ))
+            elif p == "gitlab":
+                asyncio.run(post_gitlab_review(
+                    comments, 
+                    os.environ.get("CI_PROJECT_ID", ""),
+                    os.environ.get("CI_MERGE_REQUEST_IID", ""),
+                    os.environ.get("GITLAB_TOKEN", "")
+                ))
+            elif p == "bitbucket":
+                asyncio.run(post_bitbucket_review(
+                    comments,
+                    os.environ.get("BITBUCKET_WORKSPACE", ""),
+                    os.environ.get("BITBUCKET_REPO_SLUG", ""),
+                    os.environ.get("BITBUCKET_PR_ID", ""),
+                    os.environ.get("BITBUCKET_TOKEN", "")
+                ))
+
+        if fail_on_slow and perf_report and perf_report.critical_count > 0:
+            console.print(f"[bold red]Pipeline failed: Found {perf_report.critical_count} O(n²)+ algorithmic patterns[/bold red]")
             raise typer.Exit(1)
 
         # Phase 5 — SARIF output
@@ -612,6 +719,7 @@ def analyze(
                 llm=llm_report,
                 intent_report=intent_report,
                 zeroday_report=zeroday_report,
+                shadow_report=shadow_report,
                 global_context=global_context,
                 corrections=code_corrections
             )
@@ -652,6 +760,7 @@ def analyze(
                     llm=llm_report,
                     intent_report=intent_report,
                     zeroday_report=zeroday_report,
+                    shadow_report=shadow_report,
                     global_context=global_context,
                     corrections=code_corrections
                 )
@@ -834,6 +943,234 @@ def _output_json(
 
 
 # ---------------------------------------------------------------------------
+# shadow command (standalone)
+# ---------------------------------------------------------------------------
+@app.command()
+def shadow(
+    repo_path: str = typer.Argument(".", help="Path to the repository"),
+    force_generate: bool = typer.Option(False, "--force-generate", help="Force GENERATE mode even if docs exist"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show preview without writing files"),
+    no_inline: bool = typer.Option(False, "--no-inline", help="Skip inline docstring insertion (only .md files)"),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Force LLM provider: gemini | claude | ollama"),
+    llm_delay: float = typer.Option(2.0, "--llm-delay", help="Seconds to delay between LLM calls"),
+) -> None:
+    """Shadow Developer — auto-generate or update project documentation.
+
+    \b
+    Modes:
+      GENERATE  Creates README.md, ARCHITECTURE.md, docs/api.md, and inserts docstrings.
+      UPDATE    Detects function/class signature changes and patches existing docs.
+
+    \b
+    Examples:
+      neurodiff shadow .                  # Auto-detect mode
+      neurodiff shadow . --force-generate # Force full generation
+      neurodiff shadow . --dry-run        # Preview without writing
+      neurodiff shadow . --no-inline      # Only generate .md files
+    """
+    import asyncio
+    from neurodiff.engines.shadow_engine import ShadowEngine, ShadowReport
+    from neurodiff.engines.llm_engine import get_provider
+
+    repo_path_obj = Path(repo_path).resolve()
+    if not repo_path_obj.exists():
+        console.print(f"[red]Repository path not found: {repo_path_obj}[/red]")
+        raise typer.Exit(1)
+
+    provider = get_provider(llm_provider, delay=llm_delay)
+    if not provider:
+        console.print("[red]No LLM provider configured. Set GOOGLE_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_HOST.[/red]")
+        raise typer.Exit(1)
+
+    engine = ShadowEngine(provider=provider)
+
+    console.print("[blue]Scanning repository documentation state…[/blue]")
+    inventory = engine.scan_repo(repo_path_obj)
+
+    if force_generate:
+        inventory.mode = "generate"
+
+    engine.print_preview(repo_path_obj, inventory, no_inline=no_inline)
+
+    if not dry_run:
+        if not typer.confirm("Write these files?", default=False):
+            console.print("[yellow]Aborted.[/yellow]")
+            raise typer.Exit(0)
+
+    try:
+        if inventory.mode == "generate":
+            report = asyncio.run(engine.run_generate(
+                repo_path_obj, inventory,
+                dry_run=dry_run, no_inline=no_inline,
+            ))
+        else:
+            # Update mode — no diff events in standalone, just scan existing docs
+            report = asyncio.run(engine.run_update(
+                repo_path_obj, inventory, events=[], dry_run=dry_run,
+            ))
+    except Exception as exc:
+        console.print(f"[red]Shadow Developer failed: {exc}[/red]")
+        raise typer.Exit(1)
+
+    # Print report
+    _print_shadow_cli_report(report)
+
+
+def _print_shadow_cli_report(report: Any) -> None:
+    """Print a standalone Shadow Developer report to the terminal."""
+    console.print(f"\n[bold magenta]━━━ 📝 Shadow Developer ━━━━━━━━━━━━━━━━━━[/bold magenta]")
+    console.print(f"\nMode: [bold]{report.mode.upper()}[/bold]")
+
+    if report.error:
+        console.print(f"[red]Error: {report.error}[/red]")
+        return
+
+    if report.files_generated:
+        console.print("\n[bold]Generated:[/bold]")
+        for f in report.files_generated:
+            console.print(f"  [green]✅[/green] {f}")
+
+    if report.files_updated:
+        console.print("\n[bold]Updated:[/bold]")
+        for f in report.files_updated:
+            console.print(f"  [green]✅[/green] {f}")
+
+    if report.docstrings_added:
+        console.print(f"\n[bold]Docstrings added:[/bold] {report.docstrings_added}")
+    if report.docstrings_updated:
+        console.print(f"[bold]Docstrings updated:[/bold] {report.docstrings_updated}")
+    if report.functions_still_undocumented:
+        console.print(f"[yellow]⚠️  Functions still undocumented:[/yellow] {report.functions_still_undocumented}")
+
+    console.print(f"\n[bold]Coverage:[/bold] {report.coverage_before:.1f}% → {report.coverage_after:.1f}%")
+    console.print()
+
+
+# ---------------------------------------------------------------------------
+# perf command (standalone — analyzes entire codebase, not just a diff)
+# ---------------------------------------------------------------------------
+@app.command()
+def perf(
+    repo_path: str = typer.Argument(".", help="Path to the repository"),
+    only_changed: bool = typer.Option(False, "--only-changed", help="Only analyze functions modified in the last commit"),
+    write_benchmarks: bool = typer.Option(False, "--write-benchmarks", help="Write perf_benchmark.py"),
+    fail_on_slow: bool = typer.Option(False, "--fail-on-slow", help="Exit 1 if O(n²)+ patterns found"),
+    perf_limit: int = typer.Option(5, "--perf-limit", help="Maximum number of rewrites to generate"),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="gemini | claude | ollama"),
+    llm_delay: float = typer.Option(2.0, "--llm-delay"),
+    use_llm: bool = typer.Option(False, "--llm", help="Generate optimized rewrites via LLM"),
+) -> None:
+    """Algorithm Performance Reviewer — find and fix O(n²)+ patterns.
+
+    \b
+    Examples:
+      neurodiff perf .                          # Scan whole repo (AST only)
+      neurodiff perf . --llm                    # AST + LLM rewrites
+      neurodiff perf . --llm --write-benchmarks # + runnable speedup proofs
+      neurodiff perf . --fail-on-slow           # CI gate: fail on O(n²)
+    """
+    import asyncio
+    from neurodiff.engines.perf_engine import PerfEngine, analyze_function, AlgorithmFinding
+    from neurodiff.engines.llm_engine import get_provider
+
+    repo_path_obj = Path(repo_path).resolve()
+    if not repo_path_obj.exists():
+        console.print(f"[red]Path not found: {repo_path_obj}[/red]")
+        raise typer.Exit(1)
+
+    provider = get_provider(llm_provider, delay=llm_delay) if use_llm else None
+
+    # Walk all .py files and collect findings
+    console.print("[blue]Scanning Python files for performance issues…[/blue]")
+    all_findings: list[AlgorithmFinding] = []
+    files_scanned = 0
+
+    skip_dirs = {".git", "venv", ".venv", "__pycache__", ".tox", "dist", "build"}
+    for py_file in sorted(repo_path_obj.rglob("*.py")):
+        if set(py_file.parts) & skip_dirs:
+            continue
+        files_scanned += 1
+        try:
+            source = py_file.read_text(encoding="utf-8", errors="replace")
+            found = analyze_function(source, func_name="", file_path=str(py_file.relative_to(repo_path_obj)))
+            all_findings.extend(found)
+        except Exception:
+            pass
+
+    console.print(f"  Scanned {files_scanned} files — found [bold]{len(all_findings)}[/bold] performance issues")
+
+    if not all_findings:
+        console.print("[green]✓ No algorithmic performance issues detected.[/green]")
+        return
+
+    # Print findings table
+    from rich.table import Table
+    t = Table(title="Performance Findings", show_lines=True)
+    t.add_column("Severity", style="bold", width=10)
+    t.add_column("Pattern", width=30)
+    t.add_column("Function", width=25)
+    t.add_column("File", width=40)
+    t.add_column("Before → After", width=22)
+
+    severity_colors = {"critical": "red", "high": "yellow", "medium": "cyan", "low": "dim"}
+    for f in sorted(all_findings, key=lambda x: {"critical": 0, "high": 1, "medium": 2, "low": 3}[x.severity]):
+        col = severity_colors.get(f.severity, "white")
+        t.add_row(
+            f"[{col}]{f.severity.upper()}[/{col}]",
+            f.pattern_type,
+            f.function_name,
+            f.file,
+            f"{f.complexity_before} → {f.complexity_after}",
+        )
+    console.print(t)
+
+    # LLM rewrites
+    if provider and all_findings:
+        console.print(f"\n[cyan]Generating optimized rewrites via {provider.name}…[/cyan]")
+        from neurodiff.engines.perf_engine import PerfEngine, BenchmarkGenerator
+        eng = PerfEngine(provider=provider)
+        # Use a dummy report structure to reuse the async rewrite logic
+        from neurodiff.engines.perf_engine import _rewrite_one, PerfReport
+
+        async def _run_rewrites():
+            sem = asyncio.Semaphore(3)
+            # Sort findings by severity (critical first)
+            severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+            top_findings = sorted(all_findings, key=lambda f: severity_order.get(f.severity, 4))
+            if perf_limit > 0:
+                top_findings = top_findings[:perf_limit]
+
+            # pyrefly: ignore [bad-argument-type]
+            tasks = [_rewrite_one(f, provider, sem) for f in top_findings]
+            return await asyncio.gather(*tasks, return_exceptions=True)
+
+        results = asyncio.run(_run_rewrites())
+        rewrites = [r for r in results if not isinstance(r, (Exception, type(None)))]
+
+        for rw in rewrites:
+            console.print(f"\n[bold magenta]⚡ {rw.finding.function_name}[/bold magenta] — {rw.finding.complexity_before} → {rw.finding.complexity_after}")
+            console.print(f"  [dim]Why slow:[/dim] {rw.why_slow}")
+            console.print(f"  [dim]Why fast:[/dim] {rw.why_fast}")
+            console.print(f"  [dim]Big O proof:[/dim] {rw.big_o_proof}")
+            console.print(f"  [green]Estimated speedup:[/green] {rw.estimated_speedup}")
+            console.print(f"  Semantic equivalence: [bold]{rw.semantic_equivalence}[/bold]")
+
+        if write_benchmarks and rewrites:
+            bench_path = repo_path_obj / "perf_benchmark.py"
+            BenchmarkGenerator.generate(rewrites, bench_path)
+            console.print(f"\n[green]✓ Benchmark written to {bench_path}[/green]")
+            console.print("[dim]  Run with: python perf_benchmark.py[/dim]")
+
+    if fail_on_slow:
+        critical = sum(1 for f in all_findings if f.severity == "critical")
+
+
+        if critical:
+            console.print(f"\n[bold red]Pipeline failed: {critical} O(n²)+ patterns detected[/bold red]")
+            raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Apply command (Phase 7)
 # ---------------------------------------------------------------------------
 @app.command()
@@ -855,6 +1192,48 @@ def apply(
     else:
         console.print(f"[red]✗ Failed to apply correction for {finding_id}: {result.stderr}[/red]")
 
+
+
+
+bot_app = typer.Typer(help="Conversational PR bot commands")
+app.add_typer(bot_app, name="bot")
+
+@bot_app.command("respond")
+def bot_respond() -> None:
+    """Handle incoming webhook payload from CI environment."""
+    from neurodiff.integrations.conversation_handler import parse_webhook_payload
+    payload_str = os.environ.get("NEURODIFF_PAYLOAD", "{}")
+    import json
+    payload = json.loads(payload_str)
+    
+    comment = parse_webhook_payload(payload)
+    if not comment:
+        console.print("[dim]No NeuroDiff command found in payload.[/dim]")
+        return
+        
+    console.print(f"[green]Detected command from {comment.author}: {comment.body}[/green]")
+    # Would route to COMMANDS and provider here...
+    
+@bot_app.command("serve")
+def bot_serve(port: int = typer.Option(8080, "--port")) -> None:
+    """Start local webhook server for testing."""
+    import http.server
+    import socketserver
+    
+    class WebhookHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+            
+    with socketserver.TCPServer(("", port), WebhookHandler) as httpd:
+        console.print(f"Serving at port {port}")
+        httpd.serve_forever()
+        
+@bot_app.command("test")
+def bot_test(finding_id: str = typer.Option(...), command: str = typer.Option(...)) -> None:
+    """Test conversation locally."""
+    console.print(f"Testing command '{command}' on finding '{finding_id}'...")
 
 if __name__ == "__main__":
     app()

@@ -326,7 +326,7 @@ class OllamaProvider:
         data = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system},
+                {"role": "system", "content": system}, 
                 {"role": "user", "content": user},
             ],
             "stream": False,
